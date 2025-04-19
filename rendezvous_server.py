@@ -1,12 +1,4 @@
-# Directory structure:
-# p2p_file_share/
-# ├── rendezvous_server.py
-# ├── fileshare_peer.py
-# ├── fileshare_client.py
-# ├── run_server.py
-# └── run_peer.py
-
-# rendezvous_server.py - with improvements
+# rendezvous_server.py
 import socket
 import threading
 import time

@@ -164,9 +164,45 @@ class FileShareClient:
         except Exception as e:
             logger.error(f"Error uploading file: {e}")
             return False
+        
+    def _safe_socket_operation(self, sock, operation, *args, timeout=10, retries=3):
+        """Perform a socket operation safely with timeouts and retries"""
+        original_timeout = sock.gettimeout()
+        sock.settimeout(timeout)
+        
+        for attempt in range(retries):
+            try:
+                if operation == "send":
+                    return sock.send(*args)
+                elif operation == "recv":
+                    return sock.recv(*args)
+                elif operation == "sendall":
+                    return sock.sendall(*args)
+                elif operation == "connect":
+                    return sock.connect(*args)
+                else:
+                    raise ValueError(f"Unknown socket operation: {operation}")
+            except socket.timeout:
+                if attempt < retries - 1:
+                    logger.debug(f"Socket {operation} timed out, retrying ({attempt+1}/{retries})")
+                    continue
+                else:
+                    raise
+            except socket.error as e:
+                logger.error(f"Socket error during {operation}: {e}")
+                raise
+            finally:
+                # Restore original timeout
+                try:
+                    sock.settimeout(original_timeout)
+                except:
+                    pass
     
     def download_file(self, peer_ip, peer_port, file_id, save_path=None):
         """Download a file from a specific peer"""
+        sock = None
+        temp_path = None
+        
         try:
             # Connect to peer
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -177,86 +213,158 @@ class FileShareClient:
             sock.send(f"DOWNLOAD {file_id}".encode())
             
             # Get file metadata
+            sock.settimeout(10)  # Shorter timeout for metadata
             response = sock.recv(1024).decode()
             if response.startswith("ERROR"):
                 logger.error(f"Download error: {response}")
-                sock.close()
                 return False
                 
             if not response.startswith("FILE:"):
                 logger.error(f"Invalid response: {response}")
-                sock.close()
                 return False
             
-            # Parse file metadata
-            # Format: "FILE: filename size hash"
-            _, metadata = response.split(':', 1)
-            parts = metadata.strip().split(' ', 2)
-            if len(parts) != 3:
-                logger.error(f"Invalid file metadata: {metadata}")
-                sock.close()
-                return False
+            # Parse file metadata safely
+            try:
+                _, metadata = response.split(':', 1)
+                parts = metadata.strip().split(' ', 2)
+                if len(parts) != 3:
+                    logger.error(f"Invalid file metadata format: {metadata}")
+                    return False
+                    
+                file_name, file_size_str, file_hash = parts
+                file_size = int(file_size_str)
                 
-            file_name, file_size_str, file_hash = parts
-            file_size = int(file_size_str)
+                # Log the hash we're expecting
+                logger.debug(f"Expected file hash: {file_hash}")
+                
+                if file_size <= 0:
+                    logger.error(f"Invalid file size: {file_size}")
+                    return False
+            except (ValueError, IndexError) as e:
+                logger.error(f"Error parsing metadata: {e}, raw: {response}")
+                return False
             
             # Determine save path
             if save_path is None:
                 save_path = self.download_dir / file_name
             
+            # Use a temporary file during download
+            temp_path = f"{save_path}.part"
+            
             # Acknowledge and start download
             sock.send(b"OK: Ready to receive")
             
-            # Receive file
+            # Receive file with proper timeouts
             received = 0
             start_time = time.time()
             last_progress_report = 0
             
-            with open(save_path, 'wb') as f:
+            with open(temp_path, 'wb') as f:
+                sock.settimeout(30)  # Longer timeout for data transfer
+                
                 while received < file_size:
-                    chunk = sock.recv(4096)
-                    if not chunk:
-                        break
+                    try:
+                        # Calculate appropriate chunk size
+                        remaining = file_size - received
+                        expected_chunk = min(4096, remaining)
                         
-                    f.write(chunk)
-                    received += len(chunk)
+                        # Receive chunk with timeout
+                        chunk = sock.recv(expected_chunk)
+                        if not chunk:  # Connection closed
+                            break
+                        
+                        # Write chunk and update stats
+                        f.write(chunk)
+                        received += len(chunk)
+                        
+                        # Send acknowledgment periodically
+                        if received % (5*1024*1024) == 0 and received < file_size:  # Every 5MB
+                            sock.send(b"ACK")
+                        
+                        # Print progress (not too frequently)
+                        now = time.time()
+                        if now - last_progress_report >= 1 or received == file_size:
+                            elapsed = now - start_time
+                            if elapsed > 0:  # Avoid division by zero
+                                progress = min(100, int(received * 100 / file_size))
+                                speed = received / elapsed / 1024
+                                logger.info(f"Download progress: {progress}% ({speed:.1f} KB/s)")
+                            last_progress_report = now
                     
-                    # Send acknowledgment for large files
-                    if received % (5*1024*1024) == 0:  # Every 5MB
-                        sock.send(b"ACK")
-                    
-                    # Print progress
-                    now = time.time()
-                    if now - last_progress_report >= 1 or received == file_size:
-                        progress = int(received * 100 / file_size)
-                        speed = received / (now - start_time) / 1024 if now > start_time else 0
-                        logger.info(f"Download progress: {progress}% ({speed:.1f} KB/s)")
-                        last_progress_report = now
+                    except socket.timeout:
+                        logger.warning("Socket timeout during download, retrying...")
+                        continue
+                    except socket.error as e:
+                        logger.error(f"Socket error: {e}")
+                        return False
             
-            sock.close()
+            # Close socket after download
+            try:
+                sock.close()
+                sock = None
+            except:
+                pass
             
-            # Verify file hash
-            if received != file_size:
+            # Verify download completeness
+            if received < file_size:
                 logger.error(f"Incomplete download: got {received}/{file_size} bytes")
                 return False
-                
-            calculated_hash = self._calculate_file_hash(save_path)
+            
+            # Verify file hash
+            calculated_hash = self._calculate_file_hash(temp_path)
+            logger.debug(f"Calculated hash: {calculated_hash}")
+            
             if calculated_hash != file_hash:
-                logger.error("File hash verification failed")
+                logger.error(f"File hash verification failed. Expected: {file_hash}, Got: {calculated_hash}")
+                # For debugging purposes, we could save the failed file with a different extension
+                debug_path = f"{save_path}.failed"
+                try:
+                    os.replace(temp_path, debug_path)
+                    logger.info(f"Saved problematic file to {debug_path} for debugging")
+                    temp_path = None
+                except:
+                    pass
                 return False
-                
+            
+            # Rename temp file to final filename
+            os.replace(temp_path, save_path)
+            temp_path = None
+            
             logger.info(f"Download successful: {file_name} saved to {save_path}")
             return True
-            
+        
         except Exception as e:
             logger.error(f"Download error: {e}")
             return False
-    
+        
+        finally:
+            # Clean up resources
+            if sock:
+                try:
+                    sock.close()
+                except:
+                    pass
+            
+            # Remove temporary file if exists
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
+
     def _calculate_file_hash(self, filepath):
         """Calculate SHA-256 hash of a file"""
         sha256 = hashlib.sha256()
-        with open(filepath, 'rb') as f:
-            for block in iter(lambda: f.read(4096), b''):
-                sha256.update(block)
-        return sha256.hexdigest()
-
+        try:
+            # Ensure binary mode for consistent hashing
+            with open(filepath, 'rb') as f:
+                # Read in reasonably sized chunks
+                for block in iter(lambda: f.read(4096), b''):
+                    sha256.update(block)
+            hash_result = sha256.hexdigest()
+            logger.debug(f"Calculated hash for {filepath}: {hash_result[:8]}...")
+            return hash_result
+        except Exception as e:
+            logger.error(f"Error calculating file hash for {filepath}: {e}")
+            # Return a dummy hash that will never match
+            return "error-calculating-hash"

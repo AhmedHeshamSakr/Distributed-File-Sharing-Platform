@@ -1,5 +1,4 @@
-
-# fileshare_peer.py - with improvements
+# fileshare_peer.py
 import socket
 import threading
 import os
@@ -34,18 +33,13 @@ class FileSharePeer:
         """Start the peer server and register with rendezvous"""
         self.server.bind((self.host, self.port))
         self.server.listen(5)
-        
         # Register with rendezvous server
         self._register_with_rendezvous()
-        
         # Start heartbeat thread
         threading.Thread(target=self._heartbeat_thread, daemon=True).start()
-        
         # Load any previously shared files
         self._load_shared_files()
-        
         logger.info(f"Peer running on {self.host}:{self.port}")
-        
         try:
             while self.running:
                 self.server.settimeout(1.0)  # Allow checking self.running
@@ -146,69 +140,86 @@ class FileSharePeer:
         finally:
             conn.close()
     
-    def _handle_upload(self, conn, data):
-        """Handle file upload request"""
-        try:
-            # Parse header (UPLOAD filename filesize hash)
-            parts = data.split(' ', 3)
-            if len(parts) != 4:
-                conn.send(b"ERROR: Invalid upload format")
-                return
-                
-            _, name, size_str, file_hash = parts
-            size = int(size_str)
-            
-            # Generate a unique ID for this file
-            file_id = str(uuid.uuid4())
-            path = self.shared_dir / file_id
-            
-            # Acknowledge upload request
-            conn.send(f"OK: {file_id}".encode())
-            
-            # Read file data with progress tracking
-            received = 0
-            with open(path, 'wb') as f:
-                while received < size:
-                    remaining = size - received
-                    chunk_size = min(4096, remaining)
-                    chunk = conn.recv(chunk_size)
-                    
-                    if not chunk:
-                        raise Exception("Connection closed before file was fully received")
-                        
-                    f.write(chunk)
-                    received += len(chunk)
-                    
-                    # Send progress updates
-                    if received % (1024*1024) == 0 or received == size:
-                        progress = int(received * 100 / size)
-                        conn.send(f"PROGRESS: {progress}".encode())
-            
-            # Verify file hash
-            calculated_hash = self._calculate_file_hash(path)
-            if calculated_hash != file_hash:
-                os.remove(path)
-                conn.send(b"ERROR: File hash verification failed")
-                return
-                
-            # Store file metadata
-            self.shared_files[file_id] = {
-                "name": name,
-                "path": str(path),
-                "size": size,
-                "hash": file_hash
-            }
-            
-            # Save updated metadata
-            self._save_shared_files()
-            
-            conn.send(b"SUCCESS: File uploaded successfully")
-            logger.info(f"File uploaded: {name} ({size} bytes), ID: {file_id}")
-            
-        except Exception as e:
-            conn.send(f"ERROR: {str(e)}".encode())
-            logger.error(f"Upload error: {e}")
     
+    def _handle_download(self, conn, data):
+        """Handle file download request"""
+        try:
+            _, file_id = data.split()
+            
+            if file_id not in self.shared_files:
+                conn.send(b"ERROR: File not found")
+                return
+                
+            file_info = self.shared_files[file_id]
+            file_path = file_info["path"]
+            
+            # Get actual file size rather than relying on stored metadata
+            # This ensures we send the correct size even if the file changed
+            file_size = os.path.getsize(file_path)
+            
+            # Update metadata if size changed
+            if file_size != file_info["size"]:
+                logger.warning(f"File size changed for {file_id}: {file_info['size']} -> {file_size}")
+                file_info["size"] = file_size
+                self._save_shared_files()
+            
+            # Send file header with metadata - ensure proper encoding and separation
+            header = f"FILE: {file_info['name']} {file_size} {file_info['hash']}"
+            conn.send(header.encode())
+            
+            # Wait for client acknowledgment with timeout
+            conn.settimeout(10)
+            try:
+                response = conn.recv(1024).decode()
+                if not response.startswith("OK"):
+                    logger.warning(f"Client rejected download: {response}")
+                    return
+            except socket.timeout:
+                logger.error("Timeout waiting for client acknowledgment")
+                return
+            
+            # Send the file in chunks with robust error handling
+            sent = 0
+            with open(file_path, 'rb') as f:
+                while sent < file_size:
+                    # Read a chunk, respecting remaining bytes
+                    remaining = file_size - sent
+                    chunk_size = min(4096, remaining)
+                    chunk = f.read(chunk_size)
+                    
+                    if not chunk:  # End of file
+                        if sent < file_size:
+                            logger.warning(f"File ended unexpectedly at {sent}/{file_size} bytes")
+                        break
+                    
+                    # Try to send with timeout and retry logic
+                    try:
+                        conn.settimeout(30)  # Longer timeout for data transfer
+                        conn.sendall(chunk)
+                        sent += len(chunk)
+                        
+                        # Get acknowledgment periodically (but not too frequently)
+                        if sent % (5*1024*1024) == 0 and sent < file_size:  # Every 5MB
+                            conn.settimeout(10)
+                            try:
+                                ack = conn.recv(1024)
+                                if not ack.startswith(b"ACK"):
+                                    logger.warning(f"Unexpected acknowledgment: {ack}")
+                            except socket.timeout:
+                                logger.warning("Timeout waiting for acknowledgment, continuing anyway")
+                    except socket.error as e:
+                        logger.error(f"Socket error while sending file: {e}")
+                        return
+            
+            logger.info(f"File {file_id} downloaded by {conn.getpeername()}: {sent}/{file_size} bytes")
+        
+        except Exception as e:
+            try:
+                conn.send(f"ERROR: {str(e)}".encode())
+            except:
+                pass  # Connection might be closed already
+            logger.error(f"Download error: {e}")
+
     def _handle_search(self, conn):
         """Handle search request for available files"""
         try:
@@ -238,29 +249,56 @@ class FileSharePeer:
         except Exception as e:
             conn.send(f"ERROR: {str(e)}".encode())
             logger.error(f"File info error: {e}")
+
+    def _safe_socket_operation(self, sock, operation, *args, timeout=10, retries=3):
+        """Perform a socket operation safely with timeouts and retries"""
+        original_timeout = sock.gettimeout()
+        sock.settimeout(timeout)
+        for attempt in range(retries):
+            try:
+                if operation == "send":
+                    return sock.send(*args)
+                elif operation == "recv":
+                    return sock.recv(*args)
+                elif operation == "sendall":
+                    return sock.sendall(*args)
+                elif operation == "connect":
+                    return sock.connect(*args)
+                else:
+                    raise ValueError(f"Unknown socket operation: {operation}")
+            except socket.timeout:
+                if attempt < retries - 1:
+                    logger.debug(f"Socket {operation} timed out, retrying ({attempt+1}/{retries})")
+                    continue
+                else:
+                    raise
+            except socket.error as e:
+                logger.error(f"Socket error during {operation}: {e}")
+                raise
+            finally:
+                # Restore original timeout
+                try:
+                    sock.settimeout(original_timeout)
+                except:
+                    pass
     
     def _handle_download(self, conn, data):
         """Handle file download request"""
         try:
             _, file_id = data.split()
-            
             if file_id not in self.shared_files:
                 conn.send(b"ERROR: File not found")
                 return
-                
             file_info = self.shared_files[file_id]
             file_path = file_info["path"]
             file_size = file_info["size"]
-            
             # Send file header with metadata
             conn.send(f"FILE: {file_info['name']} {file_size} {file_info['hash']}".encode())
-            
             # Wait for client acknowledgment
             response = conn.recv(1024).decode()
             if not response.startswith("OK"):
                 logger.warning(f"Client rejected download: {response}")
                 return
-            
             # Send the file in chunks
             sent = 0
             with open(file_path, 'rb') as f:
@@ -268,10 +306,8 @@ class FileSharePeer:
                     chunk = f.read(4096)
                     if not chunk:
                         break
-                        
                     conn.sendall(chunk)
                     sent += len(chunk)
-                    
                     # Get acknowledgment for larger files
                     if sent % (5*1024*1024) == 0:  # Every 5MB
                         conn.recv(1024)  # Wait for ACK
@@ -292,7 +328,7 @@ class FileSharePeer:
                 logger.error(f"File not found: {filepath}")
                 return None
                 
-            # Calculate file hash and size
+            # Calculate file hash and size - ensure binary mode
             file_hash = self._calculate_file_hash(filepath)
             file_size = os.path.getsize(filepath)
             file_name = os.path.basename(filepath)
@@ -301,9 +337,16 @@ class FileSharePeer:
             file_id = str(uuid.uuid4())
             dest_path = self.shared_dir / file_id
             
-            # Copy file
+            # Copy file in binary mode to preserve exact contents
             with open(filepath, 'rb') as src, open(dest_path, 'wb') as dst:
-                dst.write(src.read())
+                # Copy in chunks to handle large files
+                chunk = src.read(8192)
+                while chunk:
+                    dst.write(chunk)
+                    chunk = src.read(8192)
+            
+            # Calculate hash AFTER copying to ensure consistency
+            file_hash = self._calculate_file_hash(str(dest_path))
             
             # Store metadata
             self.shared_files[file_id] = {
@@ -316,9 +359,24 @@ class FileSharePeer:
             # Save metadata
             self._save_shared_files()
             
-            logger.info(f"Shared file: {file_name} ({file_size} bytes), ID: {file_id}")
+            logger.info(f"Shared file: {file_name} ({file_size} bytes), ID: {file_id}, Hash: {file_hash[:8]}...")
             return file_id
-            
+                
         except Exception as e:
             logger.error(f"Error sharing file: {e}")
             return None
+
+    def _calculate_file_hash(self, filepath):
+        """Calculate SHA-256 hash of a file"""
+        sha256 = hashlib.sha256()
+        try:
+            # Ensure binary mode for consistent hashing
+            with open(filepath, 'rb') as f:
+                # Use smaller chunks for better memory usage
+                for block in iter(lambda: f.read(4096), b''):
+                    sha256.update(block)
+            return sha256.hexdigest()
+        except Exception as e:
+            logger.error(f"Error calculating file hash: {e}")
+            # Return a dummy hash that will never match
+            return "error-calculating-hash"
