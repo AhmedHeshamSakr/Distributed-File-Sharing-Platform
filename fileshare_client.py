@@ -148,10 +148,17 @@ class FileShareClient:
                 if response and not response.startswith("ERROR"):
                     for file_line in response.split('\n'):
                         if file_line:
-                            parts = file_line.split(':', 2)
-                            if len(parts) == 3:
-                                file_id, file_name, file_size = parts
-                                all_files.append((ip, port, file_id, file_name, int(file_size)))
+                            parts = file_line.split(':')
+                            if len(parts) >= 3:  # At least need id:name:size
+                                try:
+                                    file_id = parts[0]
+                                    file_name = parts[1]
+                                    file_size = int(parts[2])
+                                    owner = parts[3] if len(parts) > 3 else "unknown"
+                                    all_files.append((ip, port, file_id, file_name, file_size))
+                                except (ValueError, IndexError) as e:
+                                    logger.warning(f"Invalid file info format from {ip}:{port}: {file_line} - {e}")
+                                    continue
                 
             except Exception as e:
                 logger.warning(f"Error searching peer {ip}:{port}: {e}")

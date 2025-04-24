@@ -276,8 +276,11 @@ class FileSharePeer:
         """Handle search request for available files"""
         try:
             # Format: file_id:name:size:owner
-            files = [f"{fid}:{info['name']}:{info['size']}:{info.get('owner', 'unknown')}" 
-                     for fid, info in self.shared_files.items()]
+            files = []
+            for fid, info in self.shared_files.items():
+                file_str = f"{fid}:{info['name']}:{info['size']}:{info.get('owner', 'unknown')}"
+                files.append(file_str)
+            
             conn.send('\n'.join(files).encode())
             logger.debug(f"Sent information about {len(files)} files")
         except Exception as e:
