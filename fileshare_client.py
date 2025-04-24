@@ -272,127 +272,97 @@ class FileShareClient:
         try:
             # Connect to peer
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(30)  # Longer timeout for large files
+            sock.settimeout(30)
             sock.connect((peer_ip, peer_port))
             
             # Send download request with session ID
             sock.send(f"DOWNLOAD {file_id} {self.session_id}".encode())
             
             # Get file metadata
-            sock.settimeout(10)  # Shorter timeout for metadata
+            sock.settimeout(10)
             response = sock.recv(1024).decode()
+            
             if response.startswith("ERROR"):
                 logger.error(f"Download error: {response}")
                 return False
                     
-            if not response.startswith("FILE:"):
-                logger.error(f"Invalid response: {response}")
-                return False
-            
-            # Parse file metadata safely
             try:
-                _, metadata = response.split(':', 1)
-                parts = metadata.strip().split(' ', 1)  # Changed to split into name and size only
-                if len(parts) != 2:
-                    logger.error(f"Invalid file metadata format: {metadata}")
-                    return False
-                    
-                file_name, file_size_str = parts
-                file_size = int(file_size_str)
+                # Parse JSON metadata
+                metadata = json.loads(response)
+                file_name = metadata["filename"]
+                file_size = int(metadata["size"])
                 
                 if file_size <= 0:
                     logger.error(f"Invalid file size: {file_size}")
                     return False
-            except (ValueError, IndexError) as e:
-                logger.error(f"Error parsing metadata: {e}, raw: {response}")
+            except (json.JSONDecodeError, KeyError, ValueError) as e:
+                logger.error(f"Error parsing metadata: {e}")
                 return False
             
             # Determine save path
             if save_path is None:
                 save_path = self.download_dir / file_name
             
-            # Use a temporary file during download
+            # Use temporary file
             temp_path = f"{save_path}.part"
             
-            # Acknowledge and start download
+            # Acknowledge
             sock.send(b"OK: Ready to receive")
             
-            # Receive file with proper timeouts
+            # Receive file
             received = 0
             start_time = time.time()
-            last_progress_report = 0
             
             with open(temp_path, 'wb') as f:
-                sock.settimeout(30)  # Longer timeout for data transfer
+                sock.settimeout(30)
                 
                 while received < file_size:
                     try:
-                        # Calculate appropriate chunk size
                         remaining = file_size - received
-                        expected_chunk = min(4096, remaining)
+                        chunk_size = min(4096, remaining)
+                        chunk = sock.recv(chunk_size)
                         
-                        # Receive chunk with timeout
-                        chunk = sock.recv(expected_chunk)
-                        if not chunk:  # Connection closed
+                        if not chunk:
                             break
-                        
-                        # Write chunk and update stats
+                            
                         f.write(chunk)
                         received += len(chunk)
                         
-                        # Send acknowledgment periodically
-                        if received % (5*1024*1024) == 0 and received < file_size:  # Every 5MB
-                            sock.send(b"ACK")
-                        
-                        # Print progress (not too frequently)
+                        # Progress reporting
                         now = time.time()
-                        if now - last_progress_report >= 1 or received == file_size:
-                            elapsed = now - start_time
-                            if elapsed > 0:  # Avoid division by zero
-                                progress = min(100, int(received * 100 / file_size))
-                                speed = received / elapsed / 1024
-                                logger.info(f"Download progress: {progress}% ({speed:.1f} KB/s)")
-                            last_progress_report = now
-                    
+                        if now - start_time >= 1 or received == file_size:
+                            progress = min(100, int(received * 100 / file_size))
+                            speed = received / (now - start_time) / 1024
+                            logger.info(f"Progress: {progress}% ({speed:.1f} KB/s)")
+                            start_time = now
+                            
                     except socket.timeout:
-                        logger.warning("Socket timeout during download, retrying...")
                         continue
                     except socket.error as e:
                         logger.error(f"Socket error: {e}")
                         return False
             
-            # Close socket after download
-            try:
-                sock.close()
-                sock = None
-            except:
-                pass
-            
-            # Verify download completeness
+            # Verify completion
             if received < file_size:
-                logger.error(f"Incomplete download: got {received}/{file_size} bytes")
+                logger.error(f"Incomplete download: {received}/{file_size} bytes")
                 return False
-            
-            # Rename temp file to final filename
+                
+            # Finalize download
             os.replace(temp_path, save_path)
-            temp_path = None
-            
-            logger.info(f"Download successful: {file_name} saved to {save_path}")
+            logger.info(f"Download complete: {save_path}")
             return True
-        
+            
         except Exception as e:
-            logger.error(f"Download error: {e}")
+            logger.error(f"Download failed: {e}")
             return False
-        
+            
         finally:
-            # Clean up resources
             if sock:
                 try:
                     sock.close()
                 except:
                     pass
-            
-            # Remove temporary file if exists
+                    
             if temp_path and os.path.exists(temp_path):
                 try:
                     os.remove(temp_path)

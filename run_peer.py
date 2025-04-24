@@ -110,21 +110,8 @@ class FileShareCLI(cmd.Cmd):
     # Update do_download to handle authentication better
     def do_download(self, arg):
         """Download a file (usage: download <id> [destination])"""
-        # Check if client is authenticated and try to authenticate if not
-        if not self.client.is_authenticated() and self.peer.is_authenticated():
-            # Try to authenticate with available peers
-            peers = self.client.get_peers()
-            auth_success = False
-            for peer_ip, peer_port in peers:
-                client_success, _ = self.client.login(peer_ip, peer_port, self.peer.current_username, "")
-                if client_success:
-                    auth_success = True
-                    break
-            
-            if not auth_success:
-                print("You must be logged in to download files. Use 'login <username> <password>'")
-                return
-        elif not self.client.is_authenticated():
+        # Check authentication
+        if not self.peer.is_authenticated():
             print("You must be logged in to download files. Use 'login <username> <password>'")
             return
             
@@ -156,14 +143,7 @@ class FileShareCLI(cmd.Cmd):
                 
             print(f"Downloading '{name}' ({self._format_size(size)}) from {ip}:{port}...")
             
-            # Make sure client is authenticated with the specific peer
-            if not self.peer.current_username:
-                print("You must be logged in to download files.")
-                return
-                
-            # Re-authenticate with the specific peer if needed
-            client_success, _ = self.client.login(ip, port, self.peer.current_username, "")
-            
+            # Use existing session instead of re-logging in
             success = self.client.download_file(ip, port, file_id, destination)
                 
             if success:
@@ -176,41 +156,41 @@ class FileShareCLI(cmd.Cmd):
         except Exception as e:
             print(f"Error downloading file: {e}")
 
-    
-    def do_register(self, arg):
-        """Register a new user (usage: register <username> <password>)"""
-        args = arg.split()
-        if len(args) != 2:
-            print("Usage: register <username> <password>")
-            return
-            
-        username, password = args
-        success, message = self.peer.register_user(username, password)
-        print(message)
-
-    def do_whoami(self, arg):
-        """Show current logged in user"""
-        if self.peer.is_authenticated():
-            print(f"Logged in as: {self.peer.current_username}")
-        else:
-            print("Not logged in")
-
-    # 2. Update do_share to check for authentication:
-    def do_share(self, arg):
-        """Share a local file (usage: share <filepath>)"""
-        if not self.peer.is_authenticated():
-            print("You must be logged in to share files. Use 'login <username> <password>'")
-            return
-            
-        if not arg:
-            print("Please specify a file path to share")
-            return
+        
+        def do_register(self, arg):
+            """Register a new user (usage: register <username> <password>)"""
+            args = arg.split()
+            if len(args) != 2:
+                print("Usage: register <username> <password>")
+                return
                 
-        file_id, message = self.peer.share_file(arg)
-        if file_id:
-            print(f"File shared successfully with ID: {file_id}")
-        else:
-            print(f"Failed to share file: {message}")
+            username, password = args
+            success, message = self.peer.register_user(username, password)
+            print(message)
+
+        def do_whoami(self, arg):
+            """Show current logged in user"""
+            if self.peer.is_authenticated():
+                print(f"Logged in as: {self.peer.current_username}")
+            else:
+                print("Not logged in")
+
+        # 2. Update do_share to check for authentication:
+        def do_share(self, arg):
+            """Share a local file (usage: share <filepath>)"""
+            if not self.peer.is_authenticated():
+                print("You must be logged in to share files. Use 'login <username> <password>'")
+                return
+                
+            if not arg:
+                print("Please specify a file path to share")
+                return
+                    
+            file_id, message = self.peer.share_file(arg)
+            if file_id:
+                print(f"File shared successfully with ID: {file_id}")
+            else:
+                print(f"Failed to share file: {message}")
 
     def do_help(self, arg):
         """Show help information"""

@@ -216,8 +216,11 @@ class FileSharePeer:
             file_size = os.path.getsize(file_path)
             
             # Send file header with metadata - ensure proper encoding and separation
-            header = f"FILE: {file_info['name']} {file_size}"
-            conn.send(header.encode())
+            header = json.dumps({
+                "filename": file_info['name'],
+                "size": file_size
+            }).encode()
+            conn.send(header)
             
             # Wait for client acknowledgment with timeout
             conn.settimeout(10)
