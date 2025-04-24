@@ -157,7 +157,7 @@ class FileShareCLI(cmd.Cmd):
             print(f"Error downloading file: {e}")
 
         
-        def do_register(self, arg):
+    def do_register(self, arg):
             """Register a new user (usage: register <username> <password>)"""
             args = arg.split()
             if len(args) != 2:
@@ -168,7 +168,7 @@ class FileShareCLI(cmd.Cmd):
             success, message = self.peer.register_user(username, password)
             print(message)
 
-        def do_whoami(self, arg):
+    def do_whoami(self, arg):
             """Show current logged in user"""
             if self.peer.is_authenticated():
                 print(f"Logged in as: {self.peer.current_username}")
@@ -176,7 +176,7 @@ class FileShareCLI(cmd.Cmd):
                 print("Not logged in")
 
         # 2. Update do_share to check for authentication:
-        def do_share(self, arg):
+    def do_share(self, arg):
             """Share a local file (usage: share <filepath>)"""
             if not self.peer.is_authenticated():
                 print("You must be logged in to share files. Use 'login <username> <password>'")
