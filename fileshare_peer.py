@@ -4,10 +4,10 @@ import threading
 import os
 import uuid
 import time
-import hashlib
 import json
 import logging
 from pathlib import Path
+from user_auth import UserAuth
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('FileSharePeer')
@@ -16,9 +16,14 @@ class FileSharePeer:
     def __init__(self, host, port, rendezvous_host, rendezvous_port):
         self.host, self.port = host, port
         self.rendezvous = (rendezvous_host, rendezvous_port)
-        self.shared_files = {}  # {file_id: {name, path, size, hash}}
+        self.shared_files = {}  # {file_id: {name, path, size, owner}}
         self.shared_dir = Path("shared")
         self.shared_dir.mkdir(exist_ok=True)
+        
+        # User authentication
+        self.auth = UserAuth()
+        self.user_session = None  # Current user session
+        self.current_username = None  # Current logged in username
         
         # Create server socket
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -37,6 +42,8 @@ class FileSharePeer:
         self._register_with_rendezvous()
         # Start heartbeat thread
         threading.Thread(target=self._heartbeat_thread, daemon=True).start()
+        # Start session cleanup thread
+        threading.Thread(target=self._session_cleanup_thread, daemon=True).start()
         # Load any previously shared files
         self._load_shared_files()
         logger.info(f"Peer running on {self.host}:{self.port}")
@@ -89,13 +96,11 @@ class FileSharePeer:
             except Exception as e:
                 logger.warning(f"Failed to send heartbeat: {e}")
     
-    def _calculate_file_hash(self, filepath):
-        """Calculate SHA-256 hash of a file"""
-        sha256 = hashlib.sha256()
-        with open(filepath, 'rb') as f:
-            for block in iter(lambda: f.read(4096), b''):
-                sha256.update(block)
-        return sha256.hexdigest()
+    def _session_cleanup_thread(self):
+        """Periodically clean up expired sessions"""
+        while self.running:
+            time.sleep(300)  # Clean up every 5 minutes
+            self.auth.cleanup_sessions()
     
     def _load_shared_files(self):
         """Load information about previously shared files"""
@@ -132,6 +137,8 @@ class FileSharePeer:
                 self._handle_download(conn, data)
             elif data.startswith("INFO"):
                 self._handle_file_info(conn, data)
+            elif data.startswith("AUTH"):
+                self._handle_authentication(conn, data)
             else:
                 conn.send(b"ERROR: Invalid command")
                 logger.warning(f"Invalid command from {addr}: {data}")
@@ -140,11 +147,63 @@ class FileSharePeer:
         finally:
             conn.close()
     
+    def _handle_authentication(self, conn, data):
+        """Handle authentication requests (for remote API access)"""
+        try:
+            parts = data.split(' ', 2)  # Changed to handle SESSION auth type
+            if len(parts) < 3:
+                conn.send(b"ERROR: Invalid authentication format")
+                return
+                
+            _, command = parts[:2]
+            
+            if command == "REGISTER" and len(parts) == 3:
+                username, password = parts[2].split(' ', 1)
+                success, message = self.auth.register(username, password)
+                conn.send(f"{'OK' if success else 'ERROR'}: {message}".encode())
+            
+            elif command == "LOGIN" and len(parts) == 3:
+                username, password = parts[2].split(' ', 1)
+                success, message, session_id = self.auth.login(username, password)
+                if success:
+                    conn.send(f"OK: {message} {session_id}".encode())
+                else:
+                    conn.send(f"ERROR: {message}".encode())
+            
+            elif command == "SESSION" and len(parts) == 3:
+                # Handle session-based authentication
+                username, session_id = parts[2].split(' ', 1)
+                valid, _ = self.auth.validate_session(session_id)
+                if valid:
+                    conn.send(b"OK: Session validated")
+                else:
+                    conn.send(b"ERROR: Invalid session")
+            
+            else:
+                conn.send(b"ERROR: Unknown auth command")
+        
+        except Exception as e:
+            conn.send(f"ERROR: {str(e)}".encode())
+            logger.error(f"Authentication error: {e}")
     
     def _handle_download(self, conn, data):
         """Handle file download request"""
         try:
-            _, file_id = data.split()
+            parts = data.split()
+            if len(parts) < 2:
+                conn.send(b"ERROR: Invalid download format")
+                return
+            
+            if len(parts) == 3:  # With session
+                _, file_id, session_id = parts
+                # Verify session
+                valid, username = self.auth.validate_session(session_id)
+                if not valid:
+                    conn.send(b"ERROR: Authentication required")
+                    return
+            else:
+                conn.send(b"ERROR: Authentication required")
+                return
             
             if file_id not in self.shared_files:
                 conn.send(b"ERROR: File not found")
@@ -154,17 +213,10 @@ class FileSharePeer:
             file_path = file_info["path"]
             
             # Get actual file size rather than relying on stored metadata
-            # This ensures we send the correct size even if the file changed
             file_size = os.path.getsize(file_path)
             
-            # Update metadata if size changed
-            if file_size != file_info["size"]:
-                logger.warning(f"File size changed for {file_id}: {file_info['size']} -> {file_size}")
-                file_info["size"] = file_size
-                self._save_shared_files()
-            
             # Send file header with metadata - ensure proper encoding and separation
-            header = f"FILE: {file_info['name']} {file_size} {file_info['hash']}"
+            header = f"FILE: {file_info['name']} {file_size}"
             conn.send(header.encode())
             
             # Wait for client acknowledgment with timeout
@@ -211,7 +263,7 @@ class FileSharePeer:
                         logger.error(f"Socket error while sending file: {e}")
                         return
             
-            logger.info(f"File {file_id} downloaded by {conn.getpeername()}: {sent}/{file_size} bytes")
+            logger.info(f"File {file_id} downloaded by {username}: {sent}/{file_size} bytes")
         
         except Exception as e:
             try:
@@ -223,8 +275,9 @@ class FileSharePeer:
     def _handle_search(self, conn):
         """Handle search request for available files"""
         try:
-            # Format: file_id:name:size
-            files = [f"{fid}:{info['name']}:{info['size']}" for fid, info in self.shared_files.items()]
+            # Format: file_id:name:size:owner
+            files = [f"{fid}:{info['name']}:{info['size']}:{info.get('owner', 'unknown')}" 
+                     for fid, info in self.shared_files.items()]
             conn.send('\n'.join(files).encode())
             logger.debug(f"Sent information about {len(files)} files")
         except Exception as e:
@@ -234,14 +287,19 @@ class FileSharePeer:
     def _handle_file_info(self, conn, data):
         """Handle request for detailed information about a specific file"""
         try:
-            _, file_id = data.split()
+            parts = data.split()
+            if len(parts) < 2:
+                conn.send(b"ERROR: Invalid info request")
+                return
+                
+            _, file_id = parts[:2]
             
             if file_id in self.shared_files:
                 info = self.shared_files[file_id]
                 response = json.dumps({
                     "name": info["name"],
                     "size": info["size"],
-                    "hash": info["hash"]
+                    "owner": info.get("owner", "unknown")
                 })
                 conn.send(response.encode())
             else:
@@ -250,86 +308,100 @@ class FileSharePeer:
             conn.send(f"ERROR: {str(e)}".encode())
             logger.error(f"File info error: {e}")
 
-    def _safe_socket_operation(self, sock, operation, *args, timeout=10, retries=3):
-        """Perform a socket operation safely with timeouts and retries"""
-        original_timeout = sock.gettimeout()
-        sock.settimeout(timeout)
-        for attempt in range(retries):
-            try:
-                if operation == "send":
-                    return sock.send(*args)
-                elif operation == "recv":
-                    return sock.recv(*args)
-                elif operation == "sendall":
-                    return sock.sendall(*args)
-                elif operation == "connect":
-                    return sock.connect(*args)
-                else:
-                    raise ValueError(f"Unknown socket operation: {operation}")
-            except socket.timeout:
-                if attempt < retries - 1:
-                    logger.debug(f"Socket {operation} timed out, retrying ({attempt+1}/{retries})")
-                    continue
-                else:
-                    raise
-            except socket.error as e:
-                logger.error(f"Socket error during {operation}: {e}")
-                raise
-            finally:
-                # Restore original timeout
-                try:
-                    sock.settimeout(original_timeout)
-                except:
-                    pass
-    
-    def _handle_download(self, conn, data):
-        """Handle file download request"""
+    def _handle_upload(self, conn, data):
+        """Handle file upload from another peer"""
         try:
-            _, file_id = data.split()
-            if file_id not in self.shared_files:
-                conn.send(b"ERROR: File not found")
+            parts = data.split(' ', 3)
+            if len(parts) != 4:
+                conn.send(b"ERROR: Invalid upload format")
                 return
-            file_info = self.shared_files[file_id]
-            file_path = file_info["path"]
-            file_size = file_info["size"]
-            # Send file header with metadata
-            conn.send(f"FILE: {file_info['name']} {file_size} {file_info['hash']}".encode())
-            # Wait for client acknowledgment
-            response = conn.recv(1024).decode()
-            if not response.startswith("OK"):
-                logger.warning(f"Client rejected download: {response}")
+                
+            _, file_name, file_size_str, session_id = parts
+            
+            # Verify session
+            valid, username = self.auth.validate_session(session_id)
+            if not valid:
+                conn.send(b"ERROR: Authentication required")
                 return
-            # Send the file in chunks
-            sent = 0
-            with open(file_path, 'rb') as f:
-                while sent < file_size:
-                    chunk = f.read(4096)
+                
+            file_size = int(file_size_str)
+            
+            # Generate file ID and prepare destination path
+            file_id = str(uuid.uuid4())
+            dest_path = self.shared_dir / file_id
+            
+            # Acknowledge and prepare for upload
+            conn.send(f"OK: {file_id}".encode())
+            
+            # Receive file
+            received = 0
+            last_progress = 0
+            
+            with open(dest_path, 'wb') as f:
+                while received < file_size:
+                    # Calculate appropriate chunk size
+                    remaining = file_size - received
+                    chunk_size = min(4096, remaining)
+                    
+                    # Receive chunk
+                    chunk = conn.recv(chunk_size)
                     if not chunk:
                         break
-                    conn.sendall(chunk)
-                    sent += len(chunk)
-                    # Get acknowledgment for larger files
-                    if sent % (5*1024*1024) == 0:  # Every 5MB
-                        conn.recv(1024)  # Wait for ACK
+                        
+                    # Write chunk and update progress
+                    f.write(chunk)
+                    received += len(chunk)
+                    
+                    # Send progress updates
+                    if received == file_size or received - last_progress >= 1024*1024:  # Every 1MB
+                        progress = int(received * 100 / file_size)
+                        conn.send(f"PROGRESS: {progress}".encode())
+                        last_progress = received
             
-            logger.info(f"File {file_id} downloaded by {conn.getpeername()}")
+            # Verify completeness
+            if received < file_size:
+                conn.send(b"ERROR: Incomplete upload")
+                os.remove(dest_path)
+                return
+                
+            # Store metadata
+            self.shared_files[file_id] = {
+                "name": file_name,
+                "path": str(dest_path),
+                "size": file_size,
+                "owner": username
+            }
+            
+            # Save metadata
+            self._save_shared_files()
+            
+            # Send success response
+            conn.send(b"SUCCESS: Upload complete")
+            logger.info(f"File uploaded: {file_name} by {username}, ID: {file_id}")
             
         except Exception as e:
             try:
                 conn.send(f"ERROR: {str(e)}".encode())
+                # Clean up partial file
+                if 'dest_path' in locals() and os.path.exists(dest_path):
+                    os.remove(dest_path)
             except:
-                pass  # Connection might be closed already
-            logger.error(f"Download error: {e}")
+                pass
+            logger.error(f"Upload error: {e}")
 
     def share_file(self, filepath):
         """Share a local file (utility method for integration)"""
+        # Check if user is authenticated
+        if not self.user_session:
+            logger.error("Authentication required to share files")
+            return None, "Authentication required"
+            
         try:
             if not os.path.exists(filepath):
                 logger.error(f"File not found: {filepath}")
-                return None
+                return None, "File not found"
                 
-            # Calculate file hash and size - ensure binary mode
-            file_hash = self._calculate_file_hash(filepath)
+            # Calculate file size
             file_size = os.path.getsize(filepath)
             file_name = os.path.basename(filepath)
             
@@ -345,38 +417,55 @@ class FileSharePeer:
                     dst.write(chunk)
                     chunk = src.read(8192)
             
-            # Calculate hash AFTER copying to ensure consistency
-            file_hash = self._calculate_file_hash(str(dest_path))
-            
             # Store metadata
             self.shared_files[file_id] = {
                 "name": file_name,
                 "path": str(dest_path),
                 "size": file_size,
-                "hash": file_hash
+                "owner": self.current_username
             }
             
             # Save metadata
             self._save_shared_files()
             
-            logger.info(f"Shared file: {file_name} ({file_size} bytes), ID: {file_id}, Hash: {file_hash[:8]}...")
-            return file_id
+            logger.info(f"Shared file: {file_name} ({file_size} bytes), ID: {file_id}")
+            return file_id, "File shared successfully"
                 
         except Exception as e:
             logger.error(f"Error sharing file: {e}")
-            return None
-
-    def _calculate_file_hash(self, filepath):
-        """Calculate SHA-256 hash of a file"""
-        sha256 = hashlib.sha256()
-        try:
-            # Ensure binary mode for consistent hashing
-            with open(filepath, 'rb') as f:
-                # Use smaller chunks for better memory usage
-                for block in iter(lambda: f.read(4096), b''):
-                    sha256.update(block)
-            return sha256.hexdigest()
-        except Exception as e:
-            logger.error(f"Error calculating file hash: {e}")
-            # Return a dummy hash that will never match
-            return "error-calculating-hash"
+            return None, f"Error: {str(e)}"
+    
+    # User authentication methods
+    def register_user(self, username, password):
+        """Register a new user"""
+        return self.auth.register(username, password)
+    
+    def login_user(self, username, password):
+        """Login user and set current session"""
+        success, message, session_id = self.auth.login(username, password)
+        if success:
+            self.user_session = session_id
+            self.current_username = username
+        return success, message
+    
+    def logout_user(self):
+        """Logout current user"""
+        if self.user_session:
+            result, message = self.auth.logout(self.user_session)
+            self.user_session = None
+            self.current_username = None
+            return result, message
+        return False, "No active session"
+    
+    def is_authenticated(self):
+        """Check if a user is currently authenticated"""
+        if not self.user_session:
+            return False
+        valid, username = self.auth.validate_session(self.user_session)
+        if valid:
+            self.current_username = username
+            return True
+        else:
+            self.user_session = None
+            self.current_username = None
+            return False

@@ -1,6 +1,6 @@
 
 
-# fileshare_client.py - with improvements
+# fileshare_client.py 
 import socket
 import os
 import time
@@ -17,7 +17,90 @@ class FileShareClient:
         self.rendezvous = (rendezvous_host, rendezvous_port)
         self.download_dir = Path("downloads")
         self.download_dir.mkdir(exist_ok=True)
-    
+        self.session_id = None  
+        self.username = None    
+
+    def register(self, peer_ip, peer_port, username, password):
+        """Register a new user with a peer"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            sock.connect((peer_ip, peer_port))
+            sock.send(f"AUTH REGISTER {username} {password}".encode())
+            
+            response = sock.recv(1024).decode()
+            sock.close()
+            
+            success = response.startswith("OK")
+            message = response.split(':', 1)[1].strip() if ':' in response else response
+            
+            if success:
+                logger.info(f"Successfully registered user: {username}")
+            else:
+                logger.error(f"Registration failed: {message}")
+            
+            return success, message
+            
+        except Exception as e:
+            logger.error(f"Error during registration: {e}")
+            return False, str(e)
+
+    def login(self, peer_ip, peer_port, username, password):
+        """Log in and get a session token"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            sock.connect((peer_ip, peer_port))
+            sock.send(f"AUTH LOGIN {username} {password}".encode())
+            
+            response = sock.recv(1024).decode()
+            sock.close()
+            
+            if response.startswith("OK"):
+                parts = response.split(' ')
+                if len(parts) >= 3:
+                    self.session_id = parts[-1].strip()
+                    self.username = username
+                    logger.info(f"Successfully logged in as: {username}")
+                    return True, "Login successful"
+                else:
+                    logger.error("Invalid login response format")
+                    return False, "Invalid response from server"
+            else:
+                message = response.split(':', 1)[1].strip() if ':' in response else response
+                logger.error(f"Login failed: {message}")
+                return False, message
+            
+        except Exception as e:
+            logger.error(f"Error during login: {e}")
+            return False, str(e)
+
+    def logout(self):
+        """Clear the current session"""
+        self.session_id = None
+        self.username = None
+        return True, "Logged out successfully"
+
+    def is_authenticated(self):
+        """Check if the client is currently authenticated"""
+        return self.session_id is not None
+        
+    def authenticate_with_peer(self, peer_ip, peer_port):
+        """Authenticate with a peer using existing session info"""
+        if not self.is_authenticated() or not self.username:
+            return False
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            sock.connect((peer_ip, peer_port))
+            sock.send(f"AUTH SESSION {self.username} {self.session_id}".encode())
+            response = sock.recv(1024).decode()
+            sock.close()
+            return response.startswith("OK")
+        except Exception as e:
+            logger.error(f"Error authenticating with peer: {e}")
+            return False
+
     def get_peers(self):
         """Get list of active peers from rendezvous server"""
         try:
@@ -102,10 +185,14 @@ class FileShareClient:
         if not os.path.exists(filepath):
             logger.error(f"File not found: {filepath}")
             return False
+        
+        # Check authentication
+        if not self.is_authenticated():
+            logger.error("Authentication required to upload files")
+            return False
             
         try:
-            # Calculate file hash and size
-            file_hash = self._calculate_file_hash(filepath)
+            # Calculate file size
             file_size = os.path.getsize(filepath)
             file_name = os.path.basename(filepath)
             
@@ -114,8 +201,8 @@ class FileShareClient:
             sock.settimeout(30)  # Longer timeout for large files
             sock.connect((peer_ip, peer_port))
             
-            # Send upload request with metadata
-            sock.send(f"UPLOAD {file_name} {file_size} {file_hash}".encode())
+            # Send upload request with metadata and session
+            sock.send(f"UPLOAD {file_name} {file_size} {self.session_id}".encode())
             
             # Get acknowledgment and file ID
             response = sock.recv(1024).decode()
@@ -123,7 +210,7 @@ class FileShareClient:
                 logger.error(f"Peer rejected upload: {response}")
                 sock.close()
                 return False
-                
+                    
             file_id = response.split(':', 1)[1].strip()
             
             # Send file data
@@ -164,44 +251,16 @@ class FileShareClient:
         except Exception as e:
             logger.error(f"Error uploading file: {e}")
             return False
-        
-    def _safe_socket_operation(self, sock, operation, *args, timeout=10, retries=3):
-        """Perform a socket operation safely with timeouts and retries"""
-        original_timeout = sock.gettimeout()
-        sock.settimeout(timeout)
-        
-        for attempt in range(retries):
-            try:
-                if operation == "send":
-                    return sock.send(*args)
-                elif operation == "recv":
-                    return sock.recv(*args)
-                elif operation == "sendall":
-                    return sock.sendall(*args)
-                elif operation == "connect":
-                    return sock.connect(*args)
-                else:
-                    raise ValueError(f"Unknown socket operation: {operation}")
-            except socket.timeout:
-                if attempt < retries - 1:
-                    logger.debug(f"Socket {operation} timed out, retrying ({attempt+1}/{retries})")
-                    continue
-                else:
-                    raise
-            except socket.error as e:
-                logger.error(f"Socket error during {operation}: {e}")
-                raise
-            finally:
-                # Restore original timeout
-                try:
-                    sock.settimeout(original_timeout)
-                except:
-                    pass
-    
+
     def download_file(self, peer_ip, peer_port, file_id, save_path=None):
         """Download a file from a specific peer"""
         sock = None
         temp_path = None
+        
+        # Check authentication
+        if not self.is_authenticated():
+            logger.error("Authentication required to download files")
+            return False
         
         try:
             # Connect to peer
@@ -209,8 +268,8 @@ class FileShareClient:
             sock.settimeout(30)  # Longer timeout for large files
             sock.connect((peer_ip, peer_port))
             
-            # Send download request
-            sock.send(f"DOWNLOAD {file_id}".encode())
+            # Send download request with session ID
+            sock.send(f"DOWNLOAD {file_id} {self.session_id}".encode())
             
             # Get file metadata
             sock.settimeout(10)  # Shorter timeout for metadata
@@ -218,7 +277,7 @@ class FileShareClient:
             if response.startswith("ERROR"):
                 logger.error(f"Download error: {response}")
                 return False
-                
+                    
             if not response.startswith("FILE:"):
                 logger.error(f"Invalid response: {response}")
                 return False
@@ -226,16 +285,13 @@ class FileShareClient:
             # Parse file metadata safely
             try:
                 _, metadata = response.split(':', 1)
-                parts = metadata.strip().split(' ', 2)
-                if len(parts) != 3:
+                parts = metadata.strip().split(' ', 1)  # Changed to split into name and size only
+                if len(parts) != 2:
                     logger.error(f"Invalid file metadata format: {metadata}")
                     return False
                     
-                file_name, file_size_str, file_hash = parts
+                file_name, file_size_str = parts
                 file_size = int(file_size_str)
-                
-                # Log the hash we're expecting
-                logger.debug(f"Expected file hash: {file_hash}")
                 
                 if file_size <= 0:
                     logger.error(f"Invalid file size: {file_size}")
@@ -310,22 +366,6 @@ class FileShareClient:
                 logger.error(f"Incomplete download: got {received}/{file_size} bytes")
                 return False
             
-            # Verify file hash
-            calculated_hash = self._calculate_file_hash(temp_path)
-            logger.debug(f"Calculated hash: {calculated_hash}")
-            
-            if calculated_hash != file_hash:
-                logger.error(f"File hash verification failed. Expected: {file_hash}, Got: {calculated_hash}")
-                # For debugging purposes, we could save the failed file with a different extension
-                debug_path = f"{save_path}.failed"
-                try:
-                    os.replace(temp_path, debug_path)
-                    logger.info(f"Saved problematic file to {debug_path} for debugging")
-                    temp_path = None
-                except:
-                    pass
-                return False
-            
             # Rename temp file to final filename
             os.replace(temp_path, save_path)
             temp_path = None
@@ -352,19 +392,37 @@ class FileShareClient:
                 except:
                     pass
 
-    def _calculate_file_hash(self, filepath):
-        """Calculate SHA-256 hash of a file"""
-        sha256 = hashlib.sha256()
-        try:
-            # Ensure binary mode for consistent hashing
-            with open(filepath, 'rb') as f:
-                # Read in reasonably sized chunks
-                for block in iter(lambda: f.read(4096), b''):
-                    sha256.update(block)
-            hash_result = sha256.hexdigest()
-            logger.debug(f"Calculated hash for {filepath}: {hash_result[:8]}...")
-            return hash_result
-        except Exception as e:
-            logger.error(f"Error calculating file hash for {filepath}: {e}")
-            # Return a dummy hash that will never match
-            return "error-calculating-hash"
+        
+    def _safe_socket_operation(self, sock, operation, *args, timeout=10, retries=3):
+        """Perform a socket operation safely with timeouts and retries"""
+        original_timeout = sock.gettimeout()
+        sock.settimeout(timeout)
+        
+        for attempt in range(retries):
+            try:
+                if operation == "send":
+                    return sock.send(*args)
+                elif operation == "recv":
+                    return sock.recv(*args)
+                elif operation == "sendall":
+                    return sock.sendall(*args)
+                elif operation == "connect":
+                    return sock.connect(*args)
+                else:
+                    raise ValueError(f"Unknown socket operation: {operation}")
+            except socket.timeout:
+                if attempt < retries - 1:
+                    logger.debug(f"Socket {operation} timed out, retrying ({attempt+1}/{retries})")
+                    continue
+                else:
+                    raise
+            except socket.error as e:
+                logger.error(f"Socket error during {operation}: {e}")
+                raise
+            finally:
+                # Restore original timeout
+                try:
+                    sock.settimeout(original_timeout)
+                except:
+                    pass
+    

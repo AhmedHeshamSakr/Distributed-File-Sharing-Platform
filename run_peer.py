@@ -7,6 +7,8 @@ import sys
 from fileshare_peer import FileSharePeer
 from fileshare_client import FileShareClient
 
+import os
+
 class FileShareCLI(cmd.Cmd):
     prompt = "p2p> "
     intro = "P2P File Sharing System. Type 'help' for commands."
@@ -23,8 +25,73 @@ class FileShareCLI(cmd.Cmd):
         self.peer_thread.daemon = True
         self.peer_thread.start()
     
+    def update_prompt(self):
+        """Update the command prompt to reflect the current login state"""
+        if self.peer.is_authenticated():
+            self.prompt = f"{self.peer.current_username}> "
+        else:
+            self.prompt = "p2p> "
+
+    # Update do_login to update the prompt
+    def do_login(self, arg):
+        """Login to your account (usage: login <username> <password>)"""
+        args = arg.split()
+        if len(args) != 2:
+            print("Usage: login <username> <password>")
+            return
+            
+        username, password = args
+        success, message = self.peer.login_user(username, password)
+        
+        # Also login the client with the first available peer
+        if success:
+            # Update the prompt immediately
+            self.update_prompt()
+            
+            # Also authenticate with all available peers for client operations
+            peers = self.client.get_peers()
+            if peers:
+                auth_success = False
+                for peer_ip, peer_port in peers:
+                    client_success, client_message = self.client.login(peer_ip, peer_port, username, password)
+                    if client_success:
+                        auth_success = True
+                
+                if not auth_success:
+                    print("Warning: Client authentication failed with all peers")
+                    print("Some operations may not work until you're properly authenticated")
+            else:
+                print("Warning: No peers available for client authentication")
+                print("Some operations may not work until you connect to a peer")
+                
+        print(message)
+
+    # Update do_logout to reset the prompt
+    def do_logout(self, arg):
+        """Logout from your account"""
+        success, message = self.peer.logout_user()
+        # Also logout the client
+        self.client.logout()
+        # Reset the prompt
+        self.update_prompt()
+        print(message)
+
+    # Modify do_search to better handle authentication
     def do_search(self, arg):
         """Search for available files in the network"""
+        if not self.client.is_authenticated():
+            # Try to automatically authenticate the client with the current peer session
+            if self.peer.is_authenticated():
+                peers = self.client.get_peers()
+                for peer_ip, peer_port in peers:
+                    self.client.login(peer_ip, peer_port, self.peer.current_username, "")  # Password won't be used here
+                    # Just try to authenticate with at least one peer
+                    if self.client.is_authenticated():
+                        break
+            
+            if not self.client.is_authenticated():
+                print("Warning: Not authenticated with any peers. Search results may be limited.")
+        
         files = self.client.search_files()
         
         if not files:
@@ -39,62 +106,132 @@ class FileShareCLI(cmd.Cmd):
         for i, (ip, port, file_id, name, size) in enumerate(files, 1):
             size_str = self._format_size(size)
             print(f"{i:<8} {size_str:<10} {ip}:{port:<21} {name}")
-    
-    def do_share(self, arg):
-        """Share a local file (usage: share <filepath>)"""
-        if not arg:
-            print("Please specify a file path to share")
+
+    # Update do_download to handle authentication better
+    def do_download(self, arg):
+        """Download a file (usage: download <id> [destination])"""
+        # Check if client is authenticated and try to authenticate if not
+        if not self.client.is_authenticated() and self.peer.is_authenticated():
+            # Try to authenticate with available peers
+            peers = self.client.get_peers()
+            auth_success = False
+            for peer_ip, peer_port in peers:
+                client_success, _ = self.client.login(peer_ip, peer_port, self.peer.current_username, "")
+                if client_success:
+                    auth_success = True
+                    break
+            
+            if not auth_success:
+                print("You must be logged in to download files. Use 'login <username> <password>'")
+                return
+        elif not self.client.is_authenticated():
+            print("You must be logged in to download files. Use 'login <username> <password>'")
             return
             
-        file_id = self.peer.share_file(arg)
-        if file_id:
-            print(f"File shared successfully with ID: {file_id}")
-    
-    def do_download(self, arg):
-        """Download a file (usage: download <id> [destination])
-        
-        <id> is the number from the search results list
-        [destination] is optional path where the file will be saved
-        """
         args = arg.split()
         if not args:
             print("Please specify a file ID to download")
             return
-            
+                
         try:
             # First search to populate the file list
             files = self.client.search_files()
             if not files:
                 print("No files available to download")
                 return
-                
+                    
             # Get the file by ID
             file_idx = int(args[0]) - 1
             if file_idx < 0 or file_idx >= len(files):
                 print(f"Invalid file ID. Use 'search' to see available files")
                 return
-                
+                    
             # Extract file info
             ip, port, file_id, name, size = files[file_idx]
-            
+                
             # Determine destination path
             destination = None
             if len(args) > 1:
                 destination = args[1]
-            
+                
             print(f"Downloading '{name}' ({self._format_size(size)}) from {ip}:{port}...")
-            success = self.client.download_file(ip, port, file_id, destination)
             
+            # Make sure client is authenticated with the specific peer
+            if not self.peer.current_username:
+                print("You must be logged in to download files.")
+                return
+                
+            # Re-authenticate with the specific peer if needed
+            client_success, _ = self.client.login(ip, port, self.peer.current_username, "")
+            
+            success = self.client.download_file(ip, port, file_id, destination)
+                
             if success:
                 print("Download complete!")
             else:
                 print("Download failed.")
-        
+            
         except ValueError:
             print("Invalid file ID. Please enter a number from the search results")
         except Exception as e:
             print(f"Error downloading file: {e}")
+
     
+    def do_register(self, arg):
+        """Register a new user (usage: register <username> <password>)"""
+        args = arg.split()
+        if len(args) != 2:
+            print("Usage: register <username> <password>")
+            return
+            
+        username, password = args
+        success, message = self.peer.register_user(username, password)
+        print(message)
+
+    def do_whoami(self, arg):
+        """Show current logged in user"""
+        if self.peer.is_authenticated():
+            print(f"Logged in as: {self.peer.current_username}")
+        else:
+            print("Not logged in")
+
+    # 2. Update do_share to check for authentication:
+    def do_share(self, arg):
+        """Share a local file (usage: share <filepath>)"""
+        if not self.peer.is_authenticated():
+            print("You must be logged in to share files. Use 'login <username> <password>'")
+            return
+            
+        if not arg:
+            print("Please specify a file path to share")
+            return
+                
+        file_id, message = self.peer.share_file(arg)
+        if file_id:
+            print(f"File shared successfully with ID: {file_id}")
+        else:
+            print(f"Failed to share file: {message}")
+
+    def do_help(self, arg):
+        """Show help information"""
+        if arg:
+            # Show help for specific command
+            super().do_help(arg)
+        else:
+            # Show general help
+            print("\nP2P File Sharing System Commands:")
+            print("  register <user> <pass> - Register a new user account")
+            print("  login <user> <pass>    - Login to your account")
+            print("  logout                 - Logout from your account")
+            print("  whoami                 - Show current user")
+            print("  search                 - Search for files in the network")
+            print("  share <filepath>       - Share a file with the network")
+            print("  download <id> [dest]   - Download a file (id from search)")
+            print("  peers                  - Show active peers")
+            print("  myfiles                - Show your shared files")
+            print("  exit                   - Exit the program")
+            print("\nFor more details on a command, type 'help command'")
+        
     def do_peers(self, arg):
         """Show the list of active peers in the network"""
         peers = self.client.get_peers()
@@ -129,22 +266,6 @@ class FileShareCLI(cmd.Cmd):
         print("Shutting down peer...")
         self.peer.running = False
         return True
-    
-    def do_help(self, arg):
-        """Show help information"""
-        if arg:
-            # Show help for specific command
-            super().do_help(arg)
-        else:
-            # Show general help
-            print("\nP2P File Sharing System Commands:")
-            print("  search             - Search for files in the network")
-            print("  share <filepath>   - Share a file with the network")
-            print("  download <id> [dest] - Download a file (id from search)")
-            print("  peers              - Show active peers")
-            print("  myfiles            - Show your shared files")
-            print("  exit               - Exit the program")
-            print("\nFor more details on a command, type 'help command'")
     
     def _format_size(self, size_bytes):
         """Format file size in human-readable format"""

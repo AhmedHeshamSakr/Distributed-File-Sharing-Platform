@@ -27,7 +27,7 @@ This is a simple peer-to-peer file sharing system with a rendezvous server for p
 
 2. Then start one or more peers:
    ```
-   python run_peer.py --rendezvous-host 127.0.0.1 --rendezvous-port 5555
+   python run_peer.py --rendezvous-host 127.0.0.1 --rendezvous-port 5555 
    ```
 
 3. From the peer command prompt, you can:
@@ -36,6 +36,11 @@ This is a simple peer-to-peer file sharing system with a rendezvous server for p
    - Download files: `download 1` (where 1 is the file ID from search results)
    - View active peers: `peers`
    - View your shared files: `myfiles`
+   - Register a new user: `register <username> <password>`
+   - Login to your account: `login <username> <password>`
+   - Logout from your account: `logout`
+   - Show current user: `whoami`
+   - Exit the program: `exit`
 
 ### Network Testing:
 For local testing, start multiple peers with different port numbers:
