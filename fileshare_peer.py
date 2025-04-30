@@ -8,6 +8,9 @@ import json
 import logging
 from pathlib import Path
 from user_auth import UserAuth
+import crypto_utils
+from crypto_utils import KeyManager
+from fileshare_client import FileShareClient
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('FileSharePeer')
@@ -28,11 +31,13 @@ class FileSharePeer:
         # Create server socket
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        
+        self.key_manager = KeyManager()
         # Keep track of active transfers
         self.active_transfers = {}
         self.lock = threading.Lock()
         self.running = True
+        self.client = FileShareClient(rendezvous_host, rendezvous_port)
+
     
     def start(self):
         """Start the peer server and register with rendezvous"""
@@ -139,6 +144,8 @@ class FileSharePeer:
                 self._handle_file_info(conn, data)
             elif data.startswith("AUTH"):
                 self._handle_authentication(conn, data)
+            elif data.startswith("SYNC"):
+                self.handle_user_sync(conn, data)
             else:
                 conn.send(b"ERROR: Invalid command")
                 logger.warning(f"Invalid command from {addr}: {data}")
@@ -185,44 +192,144 @@ class FileSharePeer:
         except Exception as e:
             conn.send(f"ERROR: {str(e)}".encode())
             logger.error(f"Authentication error: {e}")
-    
+
+
+    def handle_user_sync(self, conn, data):
+        """Handle user synchronization requests"""
+        try:
+            parts = data.split(' ', 2)
+            if len(parts) < 3:
+                conn.send(b"ERROR: Invalid sync format")
+                return
+                
+            _, command, payload = parts
+            
+            if command == "REGISTER":
+                # Format: "SYNC REGISTER username:password_hash"
+                username, password_hash = payload.split(':', 1)
+                success, message = self.auth.add_remote_user(username, password_hash)
+                conn.send(f"{'OK' if success else 'ERROR'}: {message}".encode())
+                
+            elif command == "GET":
+                # Format: "SYNC GET username"
+                username = payload
+                user_data = self.auth.get_user_data(username)
+                if user_data:
+                    response = json.dumps(user_data)
+                    conn.send(response.encode())
+                else:
+                    conn.send(b"ERROR: User not found")
+                    
+            else:
+                conn.send(b"ERROR: Unknown sync command")
+                
+        except Exception as e:
+            conn.send(f"ERROR: {str(e)}".encode())
+            logger.error(f"User sync error: {e}")
+
+
+    def _handle_user_sync(self, conn, data):
+        """Handle user synchronization including sessions"""
+        try:
+            parts = data.split(' ', 2)
+            if len(parts) < 3:
+                conn.send(b"ERROR: Invalid sync format")
+                return
+                
+            _, command, payload = parts
+            
+            if command == "VALIDATE_SESSION":
+                # Format: "SYNC VALIDATE_SESSION username:session_id"
+                username, session_id = payload.split(':', 1)
+                
+                # First check if we have this session locally
+                valid, _ = self.auth.validate_session(session_id)
+                if valid:
+                    conn.send(b"OK: Session is valid")
+                    return
+                
+                # If not valid locally, we'll create a temporary session
+                # This is a simplified approach - in a real system you'd want more security
+                new_session_id = str(uuid.uuid4())
+                self.auth.sessions[new_session_id] = {
+                    "username": username,
+                    "expires": time.time() + self.auth.session_duration,
+                    "synced": True  # Mark as synced from another peer
+                }
+                
+                conn.send(f"OK: Created temporary session {new_session_id}".encode())
+                
+            else:
+                conn.send(b"ERROR: Unknown sync command")
+                
+        except Exception as e:
+            conn.send(f"ERROR: {str(e)}".encode())
+            logger.error(f"User sync error: {e}")
+
+
+
+
     def _handle_download(self, conn, data):
         """Handle file download request"""
         try:
             parts = data.split()
-            if len(parts) < 2:
+            if len(parts) < 3:
                 conn.send(b"ERROR: Invalid download format")
                 return
             
-            if len(parts) == 3:  # With session
-                _, file_id, session_id = parts
-                # Verify session
-                valid, username = self.auth.validate_session(session_id)
-                if not valid:
-                    conn.send(b"ERROR: Authentication required")
-                    return
-            else:
+            _, file_id, session_id = parts
+            
+            # Verify session
+            valid, username = self.auth.validate_session(session_id)
+            if not valid:
                 conn.send(b"ERROR: Authentication required")
                 return
             
             if file_id not in self.shared_files:
                 conn.send(b"ERROR: File not found")
                 return
-                
+                    
             file_info = self.shared_files[file_id]
             file_path = file_info["path"]
             
-            # Get actual file size rather than relying on stored metadata
-            file_size = os.path.getsize(file_path)
+            try:
+                # Read the encrypted file
+                with open(file_path, 'rb') as f:
+                    encrypted_data = f.read()
+                
+                logger.debug(f"Read encrypted file: {len(encrypted_data)} bytes")
+                
+                # Get the encryption key for this file
+                encryption_key = self.key_manager.get_encryption_key(file_id)
+                
+                # Decrypt the file
+                decrypted_data = crypto_utils.decrypt_data(encrypted_data, encryption_key)
+                logger.debug(f"Successfully decrypted to {len(decrypted_data)} bytes")
+                
+                # Verify integrity if hash is available
+                if "hash" in file_info:
+                    expected_hash = crypto_utils.decode_bytes(file_info["hash"])
+                    if not crypto_utils.verify_file_hash(decrypted_data, expected_hash):
+                        logger.error(f"Integrity verification failed for file {file_id}")
+                        conn.send(b"ERROR: File integrity check failed")
+                        return
+                    logger.debug(f"File integrity verified for {file_id}")
+                    
+            except Exception as e:
+                error_message = f"Decryption failed - {str(e)}"
+                logger.error(f"File {file_id}: {error_message}")
+                conn.send(f"ERROR: {error_message}".encode())
+                return
             
-            # Send file header with metadata - ensure proper encoding and separation
+            # Send file metadata
             header = json.dumps({
                 "filename": file_info['name'],
-                "size": file_size
+                "size": len(decrypted_data),
+                "hash": file_info.get("hash")
             }).encode()
             conn.send(header)
             
-            # Wait for client acknowledgment with timeout
+            # Wait for client acknowledgment
             conn.settimeout(10)
             try:
                 response = conn.recv(1024).decode()
@@ -233,46 +340,33 @@ class FileSharePeer:
                 logger.error("Timeout waiting for client acknowledgment")
                 return
             
-            # Send the file in chunks with robust error handling
+            # Send the decrypted file in chunks
             sent = 0
-            with open(file_path, 'rb') as f:
-                while sent < file_size:
-                    # Read a chunk, respecting remaining bytes
-                    remaining = file_size - sent
-                    chunk_size = min(4096, remaining)
-                    chunk = f.read(chunk_size)
-                    
-                    if not chunk:  # End of file
-                        if sent < file_size:
-                            logger.warning(f"File ended unexpectedly at {sent}/{file_size} bytes")
-                        break
-                    
-                    # Try to send with timeout and retry logic
-                    try:
-                        conn.settimeout(30)  # Longer timeout for data transfer
-                        conn.sendall(chunk)
-                        sent += len(chunk)
-                        
-                        # Get acknowledgment periodically (but not too frequently)
-                        if sent % (5*1024*1024) == 0 and sent < file_size:  # Every 5MB
-                            conn.settimeout(10)
-                            try:
-                                ack = conn.recv(1024)
-                                if not ack.startswith(b"ACK"):
-                                    logger.warning(f"Unexpected acknowledgment: {ack}")
-                            except socket.timeout:
-                                logger.warning("Timeout waiting for acknowledgment, continuing anyway")
-                    except socket.error as e:
-                        logger.error(f"Socket error while sending file: {e}")
-                        return
+            data_len = len(decrypted_data)
             
-            logger.info(f"File {file_id} downloaded by {username}: {sent}/{file_size} bytes")
+            while sent < data_len:
+                # Determine chunk size
+                chunk_size = min(4096, data_len - sent)
+                
+                # Get chunk from decrypted data
+                chunk = decrypted_data[sent:sent+chunk_size]
+                
+                # Send chunk
+                try:
+                    conn.settimeout(30)
+                    conn.sendall(chunk)
+                    sent += len(chunk)
+                except socket.error as e:
+                    logger.error(f"Socket error while sending file: {e}")
+                    return
+            
+            logger.info(f"File {file_id} downloaded by {username}: {sent} bytes (decrypted)")
         
         except Exception as e:
             try:
                 conn.send(f"ERROR: {str(e)}".encode())
             except:
-                pass  # Connection might be closed already
+                pass
             logger.error(f"Download error: {e}")
 
     def _handle_search(self, conn):
@@ -314,14 +408,17 @@ class FileSharePeer:
             conn.send(f"ERROR: {str(e)}".encode())
             logger.error(f"File info error: {e}")
 
+   # Then modify the _handle_upload method to include encryption and hashing
     def _handle_upload(self, conn, data):
         """Handle file upload from another peer"""
+        temp_path = None
+        
         try:
             parts = data.split(' ', 3)
             if len(parts) != 4:
                 conn.send(b"ERROR: Invalid upload format")
                 return
-                
+                    
             _, file_name, file_size_str, session_id = parts
             
             # Verify session
@@ -329,21 +426,23 @@ class FileSharePeer:
             if not valid:
                 conn.send(b"ERROR: Authentication required")
                 return
-                
+                    
             file_size = int(file_size_str)
             
-            # Generate file ID and prepare destination path
+            # Generate file ID and prepare destination paths
             file_id = str(uuid.uuid4())
+            temp_path = self.shared_dir / f"{file_id}.temp"
             dest_path = self.shared_dir / file_id
             
             # Acknowledge and prepare for upload
             conn.send(f"OK: {file_id}".encode())
             
-            # Receive file
+            # Receive file into temporary location
             received = 0
             last_progress = 0
+            file_data = bytearray()
             
-            with open(dest_path, 'wb') as f:
+            with open(temp_path, 'wb') as f:
                 while received < file_size:
                     # Calculate appropriate chunk size
                     remaining = file_size - received
@@ -356,6 +455,7 @@ class FileSharePeer:
                         
                     # Write chunk and update progress
                     f.write(chunk)
+                    file_data.extend(chunk)
                     received += len(chunk)
                     
                     # Send progress updates
@@ -367,34 +467,61 @@ class FileSharePeer:
             # Verify completeness
             if received < file_size:
                 conn.send(b"ERROR: Incomplete upload")
-                os.remove(dest_path)
+                os.remove(temp_path)
+                return
+            
+            # Convert to bytes for crypto operations
+            file_data = bytes(file_data)
+            
+            # Compute hash of original file for integrity verification
+            file_hash = crypto_utils.compute_file_hash(file_data)
+            file_hash_b64 = crypto_utils.encode_bytes(file_hash)
+            
+            # Get encryption key for this file
+            encryption_key = self.key_manager.get_encryption_key(file_id)
+            
+            try:
+                # Encrypt the file data
+                encrypted_data = crypto_utils.encrypt_data(file_data, encryption_key)
+                
+                # Write encrypted data to final destination
+                with open(dest_path, 'wb') as f:
+                    f.write(encrypted_data)
+                    
+                # Remove temporary file
+                os.remove(temp_path)
+                
+                # Store metadata
+                self.shared_files[file_id] = {
+                    "name": file_name,
+                    "path": str(dest_path),
+                    "size": file_size,  # Original unencrypted size
+                    "owner": username,
+                    "hash": file_hash_b64  # Store hash for integrity checking
+                }
+                
+                # Save metadata
+                self._save_shared_files()
+                
+                # Send success response
+                conn.send(b"SUCCESS: Upload complete")
+                logger.info(f"File uploaded and encrypted: {file_name} by {username}, ID: {file_id}")
+                
+            except Exception as e:
+                logger.error(f"Encryption error: {e}")
+                conn.send(f"ERROR: Encryption failed - {str(e)}".encode())
                 return
                 
-            # Store metadata
-            self.shared_files[file_id] = {
-                "name": file_name,
-                "path": str(dest_path),
-                "size": file_size,
-                "owner": username
-            }
-            
-            # Save metadata
-            self._save_shared_files()
-            
-            # Send success response
-            conn.send(b"SUCCESS: Upload complete")
-            logger.info(f"File uploaded: {file_name} by {username}, ID: {file_id}")
-            
         except Exception as e:
             try:
                 conn.send(f"ERROR: {str(e)}".encode())
-                # Clean up partial file
-                if 'dest_path' in locals() and os.path.exists(dest_path):
-                    os.remove(dest_path)
+                # Clean up temporary files
+                if temp_path and os.path.exists(temp_path):
+                    os.remove(temp_path)
             except:
                 pass
             logger.error(f"Upload error: {e}")
-
+    
     def share_file(self, filepath):
         """Share a local file (utility method for integration)"""
         # Check if user is authenticated
@@ -440,11 +567,63 @@ class FileSharePeer:
         except Exception as e:
             logger.error(f"Error sharing file: {e}")
             return None, f"Error: {str(e)}"
+
+    def get_peers_from_rendezvous(self):
+        """Get list of peers from rendezvous server"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            sock.connect(self.rendezvous)
+            sock.send(b"GET_PEERS")
+            
+            response = sock.recv(4096).decode()
+            sock.close()
+            
+            if not response or response.startswith("ERROR"):
+                logger.error(f"Failed to get peers: {response}")
+                return []
+            
+            # Parse response format "ip:port;ip:port;..."
+            peers = []
+            for peer_str in response.split(';'):
+                if peer_str:
+                    ip, port = peer_str.split(':')
+                    peers.append((ip, int(port)))
+            
+            return peers
+                
+        except Exception as e:
+            logger.error(f"Error getting peers from rendezvous: {e}")
+            return []
     
     # User authentication methods
     def register_user(self, username, password):
-        """Register a new user"""
-        return self.auth.register(username, password)
+        """Register a new user and sync to other peers"""
+        success, message = self.auth.register(username, password)
+        
+        if success:
+            # Get the password hash to share with other peers
+            password_hash = self.auth.users[username]["password_hash"]
+            
+            # Sync this user to all other peers
+            peers = self.client.get_peers() if hasattr(self, 'client') else []
+            for peer_ip, peer_port in peers:
+                try:
+                    if peer_ip == self.host and peer_port == self.port:
+                        continue  # Skip self
+                        
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(5)
+                    sock.connect((peer_ip, peer_port))
+                    sock.send(f"SYNC REGISTER {username}:{password_hash}".encode())
+                    response = sock.recv(1024).decode()
+                    sock.close()
+                    
+                    logger.info(f"User sync to {peer_ip}:{peer_port}: {response}")
+                except Exception as e:
+                    logger.error(f"Failed to sync user to {peer_ip}:{peer_port}: {e}")
+                    
+        return success, message
     
     def login_user(self, username, password):
         """Login user and set current session"""

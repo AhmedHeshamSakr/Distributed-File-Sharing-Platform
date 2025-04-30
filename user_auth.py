@@ -41,6 +41,26 @@ class UserAuth:
                 self.users = {}
         else:
             self.users = {}
+
+    def add_remote_user(self, username, password_hash):
+        """Add a user from another peer (without requiring normal password validation)"""
+        if username in self.users:
+            return False, "User already exists"
+            
+        self.users[username] = {
+            "password_hash": password_hash,
+            "created_at": time.time(),
+            "is_remote": True  # Mark as coming from another peer
+        }
+        self._save_users()
+        logger.info(f"Added remote user: {username}")
+        return True, "User added"
+    
+    def get_user_data(self, username):
+        """Get user data for synchronization"""
+        if username in self.users:
+            return self.users[username]
+        return None 
     
     def _save_users(self):
         """Save user data to file"""

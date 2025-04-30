@@ -32,7 +32,6 @@ class FileShareCLI(cmd.Cmd):
         else:
             self.prompt = "p2p> "
 
-    # Update do_login to update the prompt
     def do_login(self, arg):
         """Login to your account (usage: login <username> <password>)"""
         args = arg.split()
@@ -43,26 +42,32 @@ class FileShareCLI(cmd.Cmd):
         username, password = args
         success, message = self.peer.login_user(username, password)
         
-        # Also login the client with the first available peer
+        # If local login succeeded, authenticate with all peers
         if success:
             # Update the prompt immediately
             self.update_prompt()
             
-            # Also authenticate with all available peers for client operations
+            # Get all available peers
             peers = self.client.get_peers()
             if peers:
-                auth_success = False
+                auth_success_count = 0
                 for peer_ip, peer_port in peers:
-                    client_success, client_message = self.client.login(peer_ip, peer_port, username, password)
-                    if client_success:
-                        auth_success = True
+                    try:
+                        print(f"Authenticating with peer {peer_ip}:{peer_port}...")
+                        client_success, client_message = self.client.login(peer_ip, peer_port, username, password)
+                        if client_success:
+                            auth_success_count += 1
+                        else:
+                            print(f"Warning: Authentication failed with peer {peer_ip}:{peer_port}: {client_message}")
+                    except Exception as e:
+                        print(f"Error connecting to peer {peer_ip}:{peer_port}: {e}")
                 
-                if not auth_success:
-                    print("Warning: Client authentication failed with all peers")
-                    print("Some operations may not work until you're properly authenticated")
+                print(f"Successfully authenticated with {auth_success_count} out of {len(peers)} peers")
+                
+                if auth_success_count == 0:
+                    print("Warning: Not authenticated with any remote peers. Downloads may fail.")
             else:
-                print("Warning: No peers available for client authentication")
-                print("Some operations may not work until you connect to a peer")
+                print("No other peers found in the network.")
                 
         print(message)
 
@@ -158,15 +163,20 @@ class FileShareCLI(cmd.Cmd):
 
         
     def do_register(self, arg):
-            """Register a new user (usage: register <username> <password>)"""
-            args = arg.split()
-            if len(args) != 2:
-                print("Usage: register <username> <password>")
-                return
-                
-            username, password = args
-            success, message = self.peer.register_user(username, password)
-            print(message)
+        """Register a new user (usage: register <username> <password>)"""
+        args = arg.split()
+        if len(args) != 2:
+            print("Usage: register <username> <password>")
+            return
+            
+        username, password = args
+        print(f"Registering user {username} across the network...")
+        success, message = self.peer.register_user(username, password)
+        
+        if success:
+            print("Registration successful! The account has been synchronized with other peers.")
+        else:
+            print(f"Registration failed: {message}")
 
     def do_whoami(self, arg):
             """Show current logged in user"""
