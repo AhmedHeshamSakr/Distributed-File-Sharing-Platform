@@ -293,7 +293,7 @@ class FileSharePeer:
             file_path = file_info["path"]
             
             try:
-                # Read the encrypted file
+                # Read the entire encrypted file
                 with open(file_path, 'rb') as f:
                     encrypted_data = f.read()
                 
@@ -437,90 +437,55 @@ class FileSharePeer:
             # Acknowledge and prepare for upload
             conn.send(f"OK: {file_id}".encode())
             
-            # Receive file into temporary location
+            # Receive file in chunks and ensure complete transfer
             received = 0
-            last_progress = 0
             file_data = bytearray()
             
             with open(temp_path, 'wb') as f:
                 while received < file_size:
-                    # Calculate appropriate chunk size
-                    remaining = file_size - received
-                    chunk_size = min(4096, remaining)
-                    
-                    # Receive chunk
-                    chunk = conn.recv(chunk_size)
+                    chunk = conn.recv(min(4096, file_size - received))
                     if not chunk:
                         break
-                        
-                    # Write chunk and update progress
                     f.write(chunk)
                     file_data.extend(chunk)
                     received += len(chunk)
-                    
-                    # Send progress updates
-                    if received == file_size or received - last_progress >= 1024*1024:  # Every 1MB
-                        progress = int(received * 100 / file_size)
-                        conn.send(f"PROGRESS: {progress}".encode())
-                        last_progress = received
             
             # Verify completeness
-            if received < file_size:
+            if received != file_size:
                 conn.send(b"ERROR: Incomplete upload")
                 os.remove(temp_path)
                 return
             
-            # Convert to bytes for crypto operations
-            file_data = bytes(file_data)
-            
-            # Compute hash of original file for integrity verification
-            file_hash = crypto_utils.compute_file_hash(file_data)
-            file_hash_b64 = crypto_utils.encode_bytes(file_hash)
-            
-            # Get encryption key for this file
+            # Get encryption key
             encryption_key = self.key_manager.get_encryption_key(file_id)
             
-            try:
-                # Encrypt the file data
-                encrypted_data = crypto_utils.encrypt_data(file_data, encryption_key)
-                
-                # Write encrypted data to final destination
-                with open(dest_path, 'wb') as f:
-                    f.write(encrypted_data)
-                    
-                # Remove temporary file
-                os.remove(temp_path)
-                
-                # Store metadata
-                self.shared_files[file_id] = {
-                    "name": file_name,
-                    "path": str(dest_path),
-                    "size": file_size,  # Original unencrypted size
-                    "owner": username,
-                    "hash": file_hash_b64  # Store hash for integrity checking
-                }
-                
-                # Save metadata
-                self._save_shared_files()
-                
-                # Send success response
-                conn.send(b"SUCCESS: Upload complete")
-                logger.info(f"File uploaded and encrypted: {file_name} by {username}, ID: {file_id}")
-                
-            except Exception as e:
-                logger.error(f"Encryption error: {e}")
-                conn.send(f"ERROR: Encryption failed - {str(e)}".encode())
-                return
-                
+            # Encrypt the file data
+            encrypted_data = crypto_utils.encrypt_data(bytes(file_data), encryption_key)
+            
+            # Write encrypted data to final destination
+            with open(dest_path, 'wb') as f:
+                f.write(encrypted_data)
+            
+            # Store metadata
+            self.shared_files[file_id] = {
+                "name": file_name,
+                "path": str(dest_path),
+                "size": file_size,
+                "owner": username,
+                "hash": crypto_utils.encode_bytes(crypto_utils.compute_file_hash(file_data))
+            }
+            
+            self._save_shared_files()
+            conn.send(b"SUCCESS: Upload complete")
+            
         except Exception as e:
+            logger.error(f"Upload error: {e}")
             try:
                 conn.send(f"ERROR: {str(e)}".encode())
-                # Clean up temporary files
-                if temp_path and os.path.exists(temp_path):
-                    os.remove(temp_path)
             except:
                 pass
-            logger.error(f"Upload error: {e}")
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
     
     def share_file(self, filepath):
         """Share a local file (utility method for integration)"""
