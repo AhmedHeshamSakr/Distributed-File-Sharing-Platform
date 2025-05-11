@@ -1,5 +1,4 @@
 
-# run_server.py - Entry point for running rendezvous server
 import argparse
 from rendezvous_server import RendezvousServer
 

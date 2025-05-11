@@ -1,5 +1,3 @@
-
-
 # fileshare_client.py 
 import socket
 import os
@@ -19,7 +17,18 @@ class FileShareClient:
         self.download_dir = Path("downloads")
         self.download_dir.mkdir(exist_ok=True)
         self.session_id = None  
-        self.username = None    
+        self.username = None
+        self.encrypted_storage = None
+    
+    # Initialize secure storage with a master password
+    def init_secure_storage(self, master_password):
+        """Initialize secure storage for credentials"""
+        try:
+            self.encrypted_storage = crypto_utils.EncryptedStorage(master_password)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to initialize secure storage: {e}")
+            return False
 
     def register(self, peer_ip, peer_port, username, password):
         """Register a new user with a peer"""
@@ -37,6 +46,14 @@ class FileShareClient:
             
             if success:
                 logger.info(f"Successfully registered user: {username}")
+                # Store credentials securely if secure storage is initialized
+                if self.encrypted_storage:
+                    credential_data = {
+                        "username": username,
+                        "password": password  # This should be improved with better key derivation
+                    }
+                    self.encrypted_storage.store(f"credentials_{username}", json.dumps(credential_data))
+                    logger.info(f"Stored credentials for {username} in secure storage")
             else:
                 logger.error(f"Registration failed: {message}")
             
@@ -63,6 +80,16 @@ class FileShareClient:
                     self.session_id = parts[-1].strip()
                     self.username = username
                     logger.info(f"Successfully logged in as: {username}")
+                    
+                    # Store session info securely if secure storage is initialized
+                    if self.encrypted_storage:
+                        session_data = {
+                            "username": username,
+                            "session_id": self.session_id,
+                            "timestamp": time.time()
+                        }
+                        self.encrypted_storage.store("current_session", json.dumps(session_data))
+                    
                     return True, "Login successful"
                 else:
                     logger.error("Invalid login response format")
@@ -78,6 +105,10 @@ class FileShareClient:
 
     def logout(self):
         """Clear the current session"""
+        # Clear session from secure storage if initialized
+        if self.encrypted_storage:
+            self.encrypted_storage.delete("current_session")
+        
         self.session_id = None
         self.username = None
         return True, "Logged out successfully"
@@ -157,16 +188,22 @@ class FileShareClient:
             return []
     
     def search_files(self):
-        """Search for available files across all peers"""
+        """Search for available files across all peers with proper authentication"""
         peers = self.get_peers()
-        all_files = []  # List of (peer_ip, peer_port, file_id, file_name, file_size)
+        all_files = []
         
         for ip, port in peers:
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(5)
                 sock.connect((ip, port))
-                sock.send(b"SEARCH")
+                
+                # Include authentication info in search request
+                search_command = "SEARCH"
+                if self.session_id and self.username:
+                    search_command += f" {self.username} {self.session_id}"
+                
+                sock.send(search_command.encode())
                 
                 response = sock.recv(4096).decode()
                 sock.close()
@@ -175,21 +212,17 @@ class FileShareClient:
                     for file_line in response.split('\n'):
                         if file_line:
                             parts = file_line.split(':')
-                            if len(parts) >= 3:  # At least need id:name:size
-                                try:
-                                    file_id = parts[0]
-                                    file_name = parts[1]
-                                    file_size = int(parts[2])
-                                    owner = parts[3] if len(parts) > 3 else "unknown"
-                                    all_files.append((ip, port, file_id, file_name, file_size))
-                                except (ValueError, IndexError) as e:
-                                    logger.warning(f"Invalid file info format from {ip}:{port}: {file_line} - {e}")
-                                    continue
-                
+                            if len(parts) >= 5:  # Now including access_type
+                                file_id = parts[0]
+                                file_name = parts[1]
+                                file_size = int(parts[2])
+                                owner = parts[3]
+                                access_type = parts[4]
+                                all_files.append((ip, port, file_id, file_name, file_size, owner, access_type))
+                    
             except Exception as e:
                 logger.warning(f"Error searching peer {ip}:{port}: {e}")
         
-        logger.info(f"Found {len(all_files)} files across {len(peers)} peers")
         return all_files
     
     def get_file_info(self, peer_ip, peer_port, file_id):
@@ -198,7 +231,13 @@ class FileShareClient:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(5)
             sock.connect((peer_ip, peer_port))
-            sock.send(f"INFO {file_id}".encode())
+            
+            # Include session info if available
+            info_command = f"INFO {file_id}"
+            if self.session_id and self.username:
+                info_command += f" {self.username} {self.session_id}"
+                
+            sock.send(info_command.encode())
             
             response = sock.recv(1024).decode()
             sock.close()
@@ -213,8 +252,8 @@ class FileShareClient:
             logger.error(f"Error getting file info: {e}")
             return None
     
-    def download_file(self, peer_ip, peer_port, file_id, save_path=None):
-        """Download a file from a specific peer with proper authentication and integrity verification"""
+    def download_chunked_file(self, peer_ip, peer_port, file_id, save_path=None):
+        """Download a chunked file with progress tracking"""
         sock = None
         temp_path = None
         
@@ -233,7 +272,7 @@ class FileShareClient:
                 sock.settimeout(5)
                 sock.connect((peer_ip, peer_port))
                 
-                # Use the session token as a form of credential (this relies on session sync between peers)
+                # Use the session token as a form of credential
                 auth_command = f"AUTH SESSION {self.username} {self.session_id}"
                 sock.send(auth_command.encode())
                 
@@ -246,7 +285,7 @@ class FileShareClient:
                 
                 logger.info(f"Successfully authenticated with peer {peer_ip}:{peer_port}")
             
-            # Now proceed with the download process
+            # Now proceed with the chunked download process
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(30)  # Longer timeout for file transfer
             sock.connect((peer_ip, peer_port))
@@ -263,26 +302,19 @@ class FileShareClient:
                 logger.error(f"Download error: {response}")
                 return False
             
-            try:
-                # Parse JSON metadata
-                metadata = json.loads(response)
-                file_name = metadata["filename"]
-                file_size = int(metadata["size"])
-                
-                # Get hash for integrity verification if available
-                file_hash = None
-                if "hash" in metadata and metadata["hash"]:
-                    file_hash = crypto_utils.decode_bytes(metadata["hash"])
-                
-                if file_size <= 0:
-                    logger.error(f"Invalid file size: {file_size}")
-                    return False
-                    
-                logger.info(f"Downloading file: {file_name} ({file_size} bytes)")
-                
-            except (json.JSONDecodeError, KeyError, ValueError) as e:
-                logger.error(f"Error parsing file metadata: {e}")
-                return False
+            # Parse JSON metadata
+            metadata = json.loads(response)
+            file_name = metadata["filename"]
+            file_size = int(metadata["size"])
+            
+            if "chunked" not in metadata or not metadata["chunked"]:
+                logger.warning("Expected chunked file but received single file response")
+                sock.close()
+                # Fall back to regular download
+                return self.download_file(peer_ip, peer_port, file_id, save_path)
+            
+            chunk_count = int(metadata["chunk_count"])
+            logger.info(f"Downloading chunked file: {file_name} ({file_size} bytes) in {chunk_count} chunks")
             
             # Determine save path
             if save_path is None:
@@ -291,74 +323,65 @@ class FileShareClient:
             # Use temporary file during download
             temp_path = f"{save_path}.part"
             
-            # Acknowledge readiness to receive file
-            sock.send(b"OK: Ready to receive")
+            # Acknowledge readiness to receive chunked file
+            sock.send(b"OK: Ready for chunked download")
             
-            # Receive file data
-            received = 0
+            # Prepare to receive chunks
+            received_size = 0
             start_time = time.time()
-            file_data = bytearray()  # Store complete data for integrity verification
             
             with open(temp_path, 'wb') as f:
-                sock.settimeout(30)  # Reset timeout for data transfer
-                
-                while received < file_size:
-                    try:
-                        # Calculate remaining bytes
-                        remaining = file_size - received
-                        chunk_size = min(4096, remaining)
-                        
-                        # Receive chunk
-                        chunk = sock.recv(chunk_size)
-                        
-                        if not chunk:
-                            logger.warning("Connection closed before download completed")
-                            break
-                        
-                        # Write to file and add to buffer for verification
-                        f.write(chunk)
-                        file_data.extend(chunk)
-                        received += len(chunk)
-                        
-                        # Progress reporting
-                        now = time.time()
-                        if now - start_time >= 1 or received == file_size:
-                            progress = min(100, int(received * 100 / file_size))
-                            speed = received / (now - start_time) / 1024 if now > start_time else 0
-                            logger.info(f"Progress: {progress}% ({speed:.1f} KB/s)")
-                            start_time = now
-                        
-                        # Send occasional acknowledgments to keep connection alive
-                        if received % (1024*1024) == 0 and received < file_size:  # Every 1MB
-                            sock.send(b"ACK")
-                            
-                    except socket.timeout:
-                        logger.warning("Socket timeout during download, retrying...")
-                        continue
-                    except socket.error as e:
-                        logger.error(f"Socket error: {e}")
+                for chunk_idx in range(chunk_count):
+                    # Get chunk metadata
+                    chunk_meta = sock.recv(1024).decode()
+                    if not chunk_meta.startswith("CHUNK"):
+                        logger.error(f"Expected chunk metadata, got: {chunk_meta}")
                         return False
+                    
+                    # Parse chunk metadata
+                    _, chunk_idx_str, chunk_size_str = chunk_meta.split()
+                    chunk_idx = int(chunk_idx_str)
+                    chunk_size = int(chunk_size_str)
+                    
+                    # Signal ready for chunk
+                    sock.send(f"READY {chunk_idx}".encode())
+                    
+                    # Receive chunk data
+                    chunk_received = 0
+                    chunk_data = bytearray()
+                    
+                    while chunk_received < chunk_size:
+                        remaining = chunk_size - chunk_received
+                        buffer_size = min(4096, remaining)
+                        
+                        chunk = sock.recv(buffer_size)
+                        if not chunk:
+                            logger.warning("Connection closed before chunk completed")
+                            return False
+                        
+                        chunk_data.extend(chunk)
+                        chunk_received += len(chunk)
+                    
+                    # Write chunk to file
+                    f.write(chunk_data)
+                    received_size += chunk_received
+                    
+                    # Acknowledge chunk receipt
+                    sock.send(f"ACK {chunk_idx}".encode())
+                    
+                    # Report progress
+                    progress = min(100, int(received_size * 100 / file_size))
+                    elapsed = time.time() - start_time
+                    speed = received_size / elapsed / 1024 if elapsed > 0 else 0
+                    logger.info(f"Progress: {progress}% ({speed:.1f} KB/s) - Chunk {chunk_idx+1}/{chunk_count}")
             
-            # Verify we received the full file
-            if received < file_size:
-                logger.error(f"Incomplete download: {received}/{file_size} bytes")
-                return False
-            
-            # Verify file integrity if hash was provided
-            if file_hash:
-                logger.info("Verifying file integrity...")
-                if not crypto_utils.verify_file_hash(bytes(file_data), file_hash):
-                    logger.error("File integrity verification failed!")
-                    return False
-                logger.info("File integrity verified successfully")
-            
-            # Finalize download by moving from temp file to final location
+            # Move temp file to final location
             os.replace(temp_path, save_path)
-            logger.info(f"Download complete: {save_path}")
+            logger.info(f"Chunked download complete: {save_path}")
             return True
             
         except Exception as e:
-            logger.error(f"Download failed: {e}")
+            logger.error(f"Chunked download failed: {e}")
             return False
             
         finally:
@@ -374,6 +397,226 @@ class FileShareClient:
                     os.remove(temp_path)
                 except:
                     pass
+    
+    def download_file(self, peer_ip, peer_port, file_id, save_path=None, max_retries=3):
+        """Enhanced download function with retry mechanism and better error reporting"""
+        # First check if the file is chunked
+        file_info = self.get_file_info(peer_ip, peer_port, file_id)
+        
+        # Use chunked download if needed
+        if file_info and "chunked" in file_info and file_info["chunked"]:
+            logger.info(f"File is chunked, using chunked download method")
+            return self.download_chunked_file(peer_ip, peer_port, file_id, save_path, max_retries)
+        
+        # Regular single file download
+        sock = None
+        temp_path = None
+        
+        # Check local authentication
+        if not self.is_authenticated():
+            logger.error("Not authenticated locally. Please log in first.")
+            return False
+        
+        for attempt in range(max_retries):
+            try:
+                # First, authenticate with the target peer
+                auth_result = self.authenticate_with_peer(peer_ip, peer_port)
+                
+                if not auth_result:
+                    logger.warning(f"Authentication attempt {attempt+1}/{max_retries} failed with peer {peer_ip}:{peer_port}")
+                    if attempt == max_retries - 1:
+                        logger.error("All authentication attempts failed")
+                        return False
+                    time.sleep(1)  # Wait before retry
+                    continue
+                
+                # Now proceed with the download process
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(60)  # Increased timeout for file transfer
+                sock.connect((peer_ip, peer_port))
+                
+                # Send download request with session ID
+                download_command = f"DOWNLOAD {file_id} {self.session_id}"
+                sock.send(download_command.encode())
+                
+                # Get file metadata
+                sock.settimeout(30)  # Longer timeout for metadata
+                response = sock.recv(4096).decode()  # Using larger buffer for potential JSON metadata
+                
+                if response.startswith("ERROR"):
+                    logger.error(f"Download error: {response}")
+                    if "Authentication required" in response and attempt < max_retries - 1:
+                        # Try to re-authenticate and retry
+                        sock.close()
+                        time.sleep(1)
+                        continue
+                    return False
+                
+                try:
+                    # Parse JSON metadata
+                    metadata = json.loads(response)
+                    file_name = metadata["filename"]
+                    file_size = int(metadata["size"])
+                    
+                    # Get hash for integrity verification if available
+                    file_hash = None
+                    if "hash" in metadata and metadata["hash"]:
+                        file_hash = crypto_utils.decode_bytes(metadata["hash"])
+                    
+                    if file_size <= 0:
+                        logger.error(f"Invalid file size: {file_size}")
+                        return False
+                        
+                    logger.info(f"Downloading file: {file_name} ({file_size} bytes)")
+                    
+                except (json.JSONDecodeError, KeyError, ValueError) as e:
+                    logger.error(f"Error parsing file metadata: {e}")
+                    if attempt < max_retries - 1:
+                        sock.close()
+                        time.sleep(1)
+                        continue
+                    return False
+                
+                # Determine save path
+                if save_path is None:
+                    save_path = self.download_dir / file_name
+                
+                # Use temporary file during download
+                temp_path = f"{save_path}.part"
+                
+                # Acknowledge readiness to receive file
+                sock.send(b"OK: Ready to receive")
+                
+                # Receive file data with progress tracking
+                received = 0
+                start_time = time.time()
+                file_data = bytearray()
+                
+                with open(temp_path, 'wb') as f:
+                    sock.settimeout(30)  # Reset timeout for data transfer
+                    
+                    while received < file_size:
+                        try:
+                            # Calculate remaining bytes
+                            remaining = file_size - received
+                            chunk_size = min(8192, remaining)  # Increased chunk size
+                            
+                            # Receive chunk
+                            chunk = sock.recv(chunk_size)
+                            
+                            if not chunk:
+                                logger.warning("Connection closed before download completed")
+                                if attempt < max_retries - 1:
+                                    break  # Try again
+                                else:
+                                    return False
+                            
+                            # Write to file and add to buffer for verification
+                            f.write(chunk)
+                            file_data.extend(chunk)
+                            received += len(chunk)
+                            
+                            # Progress reporting
+                            now = time.time()
+                            if now - start_time >= 1 or received == file_size:
+                                progress = min(100, int(received * 100 / file_size))
+                                speed = received / (now - start_time) / 1024 if now > start_time else 0
+                                logger.info(f"Progress: {progress}% ({speed:.1f} KB/s)")
+                            
+                            # Send occasional acknowledgments to keep connection alive
+                            if received % (1024*1024) == 0 and received < file_size:  # Every 1MB
+                                sock.send(b"ACK")
+                                
+                        except socket.timeout:
+                            logger.warning("Socket timeout during download, retrying...")
+                            continue
+                        except socket.error as e:
+                            logger.error(f"Socket error: {e}")
+                            if attempt < max_retries - 1:
+                                break  # Try again
+                            else:
+                                return False
+                
+                # Check if download was completed
+                if received < file_size:
+                    logger.warning(f"Incomplete download: {received}/{file_size} bytes, retrying...")
+                    if attempt < max_retries - 1:
+                        continue  # Try again
+                    else:
+                        logger.error("Failed to complete download after all retries")
+                        return False
+                
+                # Verify file integrity if hash was provided
+                if file_hash:
+                    logger.info("Verifying file integrity...")
+                    if not crypto_utils.verify_file_hash(bytes(file_data), file_hash):
+                        logger.error("File integrity verification failed!")
+                        if attempt < max_retries - 1:
+                            continue  # Try again
+                        else:
+                            return False
+                    logger.info("File integrity verified successfully")
+                
+                # Finalize download by moving from temp file to final location
+                os.replace(temp_path, save_path)
+                logger.info(f"Download complete: {save_path}")
+                return True
+                
+            except Exception as e:
+                logger.error(f"Download attempt {attempt+1} failed: {e}")
+                if attempt < max_retries - 1:
+                    # Wait before retry with exponential backoff
+                    time.sleep(2 ** attempt)
+                else:
+                    logger.error("All download attempts failed")
+                    return False
+                
+            finally:
+                # Clean up resources
+                if sock:
+                    try:
+                        sock.close()
+                    except:
+                        pass
+                
+                if temp_path and os.path.exists(temp_path) and attempt == max_retries - 1:
+                    try:
+                        os.remove(temp_path)
+                    except:
+                        pass
+        
+        return False  # If we reach here, all attempts failed
+
+
+    def authenticate_with_retry(self, peer_ip, peer_port, max_attempts=3):
+        """Try multiple authentication methods with peer"""
+        for attempt in range(max_attempts):
+            # First try existing session authentication
+            if self.authenticate_with_peer(peer_ip, peer_port):
+                return True
+                
+            # If that fails and we have secure storage with saved credentials
+            if hasattr(self, 'encrypted_storage') and self.encrypted_storage:
+                creds_key = f"credentials_{self.username}"
+                stored_creds = self.encrypted_storage.retrieve(creds_key)
+                
+                if stored_creds:
+                    try:
+                        cred_data = json.loads(stored_creds)
+                        username = cred_data.get("username")
+                        password = cred_data.get("password")
+                        
+                        if username and password:
+                            # Try direct login
+                            success, _ = self.login(peer_ip, peer_port, username, password)
+                            if success:
+                                return True
+                    except:
+                        pass
+            
+            time.sleep(1)
+        
+        return False
         
     def _safe_socket_operation(self, sock, operation, *args, timeout=10, retries=3):
         """Perform a socket operation safely with timeouts and retries"""
@@ -407,4 +650,3 @@ class FileShareClient:
                     sock.settimeout(original_timeout)
                 except:
                     pass
-    
