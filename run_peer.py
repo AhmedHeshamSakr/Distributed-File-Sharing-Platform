@@ -1,4 +1,3 @@
-# run_peer.py - Entry point for running a peer with CLI
 import argparse
 import threading
 import cmd
@@ -15,20 +14,16 @@ class FileShareCLI(cmd.Cmd):
     def __init__(self, host, port, rendezvous_host, rendezvous_port):
         super().__init__()
         
-        # Initialize peer and client
         self.peer = FileSharePeer(host, port, rendezvous_host, rendezvous_port)
         self.client = FileShareClient(rendezvous_host, rendezvous_port)
         
-        # Start peer server in a separate thread
         self.peer_thread = threading.Thread(target=self.peer.start)
         self.peer_thread.daemon = True
         self.peer_thread.start()
         
-        # Try to initialize secure storage
         self.secure_storage_initialized = False
     
     def do_init_secure_storage(self, arg):
-        """Initialize secure credential storage (usage: init_secure_storage)"""
         if self.secure_storage_initialized:
             print("Secure storage is already initialized")
             return
@@ -55,17 +50,14 @@ class FileShareCLI(cmd.Cmd):
             print("Failed to initialize secure storage")
     
     def update_prompt(self):
-        """Update the command prompt to reflect the current login state"""
         if self.peer.is_authenticated():
             self.prompt = f"{self.peer.current_username}> "
         else:
             self.prompt = "ciphershare> "
 
     def do_login(self, arg):
-        """Login to your account (usage: login <username> <password>)"""
         args = arg.split(maxsplit=1)
         if len(args) == 1:
-            # Only username provided, prompt for password
             username = args[0]
             print(f"Enter password for {username}:")
             password = getpass.getpass()
@@ -77,12 +69,9 @@ class FileShareCLI(cmd.Cmd):
             
         success, message = self.peer.login_user(username, password)
         
-        # If local login succeeded, authenticate with all peers
         if success:
-            # Update the prompt immediately
             self.update_prompt()
             
-            # Get all available peers
             peers = self.client.get_peers()
             if peers:
                 auth_success_count = 0
@@ -107,23 +96,17 @@ class FileShareCLI(cmd.Cmd):
         print(message)
 
     def do_logout(self, arg):
-        """Logout from your account"""
         success, message = self.peer.logout_user()
-        # Also logout the client
         self.client.logout()
-        # Reset the prompt
         self.update_prompt()
         print(message)
 
     def do_search(self, arg):
-        """Search for available files in the network"""
         if not self.client.is_authenticated():
-            # Try to automatically authenticate the client with the current peer session
             if self.peer.is_authenticated():
                 peers = self.client.get_peers()
                 for peer_ip, peer_port in peers:
-                    self.client.login(peer_ip, peer_port, self.peer.current_username, "")  # Password won't be used here
-                    # Just try to authenticate with at least one peer
+                    self.client.login(peer_ip, peer_port, self.peer.current_username, "")
                     if self.client.is_authenticated():
                         break
             
@@ -146,8 +129,6 @@ class FileShareCLI(cmd.Cmd):
             print(f"{i:<8} {size_str:<10} {ip}:{port:<21} {owner:<15} {access_type:<10} {name}")
 
     def do_download(self, arg):
-        """Download a file (usage: download <id> [destination])"""
-        # Check authentication
         if not self.peer.is_authenticated():
             print("You must be logged in to download files. Use 'login <username> <password>'")
             return
@@ -158,29 +139,24 @@ class FileShareCLI(cmd.Cmd):
             return
                 
         try:
-            # First search to populate the file list
             files = self.client.search_files()
             if not files:
                 print("No files available to download")
                 return
                     
-            # Get the file by ID
             file_idx = int(args[0]) - 1
             if file_idx < 0 or file_idx >= len(files):
                 print(f"Invalid file ID. Use 'search' to see available files")
                 return
                     
-            # Extract file info
             ip, port, file_id, name, size, owner, access_type = files[file_idx]
                 
-            # Determine destination path
             destination = None
             if len(args) > 1:
                 destination = args[1]
                 
             print(f"Downloading '{name}' ({self._format_size(size)}) from {ip}:{port}...")
             
-            # Use existing session instead of re-logging in
             success = self.client.download_file(ip, port, file_id, destination)
                 
             if success:
@@ -194,11 +170,9 @@ class FileShareCLI(cmd.Cmd):
             print(f"Error downloading file: {e}")
 
     def do_register(self, arg):
-        """Register a new user (usage: register <username> <password>)"""
         args = arg.split(maxsplit=1)
         
         if len(args) == 1:
-            # Only username provided, prompt for password
             username = args[0]
             print(f"Enter password for new user {username}:")
             password = getpass.getpass()
@@ -223,14 +197,12 @@ class FileShareCLI(cmd.Cmd):
             print(f"Registration failed: {message}")
 
     def do_whoami(self, arg):
-        """Show current logged in user"""
         if self.peer.is_authenticated():
             print(f"Logged in as: {self.peer.current_username}")
         else:
             print("Not logged in")
 
     def do_share(self, arg):
-        """Share a local file (usage: share <filepath>)"""
         if not self.peer.is_authenticated():
             print("You must be logged in to share files. Use 'login <username> <password>'")
             return
@@ -246,7 +218,6 @@ class FileShareCLI(cmd.Cmd):
             print(f"Failed to share file: {message}")
 
     def do_share_with(self, arg):
-        """Share a file with specific users (usage: share_with <filepath> <username1,username2,...>)"""
         if not self.peer.is_authenticated():
             print("You must be logged in to share files. Use 'login <username> <password>'")
             return
@@ -267,12 +238,9 @@ class FileShareCLI(cmd.Cmd):
             print(f"Failed to share file: {message}")
 
     def do_help(self, arg):
-        """Show help information"""
         if arg:
-            # Show help for specific command
             super().do_help(arg)
         else:
-            # Show general help
             print("\nCipherShare: Secure P2P File Sharing System Commands:")
             print("\nUser Management:")
             print("  register <user> [<pass>] - Register a new user account")
@@ -303,7 +271,6 @@ class FileShareCLI(cmd.Cmd):
             print("  download <id> [dest]     - Download a file (id from search)")
         
     def do_peers(self, arg):
-        """Show the list of active peers in the network"""
         peers = self.client.get_peers()
         
         if not peers:
@@ -317,7 +284,6 @@ class FileShareCLI(cmd.Cmd):
         print(f"\nTotal: {len(peers)} peers")
     
     def do_myfiles(self, arg):
-        """Show the files you are sharing"""
         if not self.peer.shared_files:
             print("You are not sharing any files.")
             return
@@ -335,19 +301,16 @@ class FileShareCLI(cmd.Cmd):
             
             print(f"{i:<8} {size_str:<10} {chunked:<10} {access:<15} {info['name']}")
             
-            # Show allowed users if restricted
             if allowed_users:
                 users_list = ", ".join(allowed_users)
                 print(f"  Allowed users: {users_list}")
     
     def do_exit(self, arg):
-        """Exit the program"""
         print("Shutting down peer...")
         self.peer.running = False
         return True
     
     def _format_size(self, size_bytes):
-        """Format file size in human-readable format"""
         if size_bytes < 1024:
             return f"{size_bytes} B"
         elif size_bytes < 1024 * 1024:
@@ -357,15 +320,11 @@ class FileShareCLI(cmd.Cmd):
         else:
             return f"{size_bytes/(1024*1024*1024):.1f} GB"
 
-
-
     def do_shared_with_me(self, arg):
-        """Show files that have been shared with you"""
         if not self.peer.is_authenticated():
             print("You must be logged in to see files shared with you.")
             return
             
-        # Update the shared with me list
         shared_files = self.peer.update_shared_with_me()
         
         if not shared_files:
@@ -384,7 +343,6 @@ class FileShareCLI(cmd.Cmd):
             
             print(f"{i:<8} {size_str:<10} {owner:<15} {peer:<21} {info['name']}")
 
-
 def main():
     parser = argparse.ArgumentParser(description="CipherShare P2P File Sharing")
     parser.add_argument("--host", default="127.0.0.1", help="Host IP for this peer")
@@ -394,7 +352,6 @@ def main():
     
     args = parser.parse_args()
     
-    # Use random port if not specified
     if args.port == 0:
         import socket
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -412,3 +369,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+    

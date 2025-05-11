@@ -9,85 +9,67 @@ from PIL import Image, ImageTk
 import logging
 from pathlib import Path
 
-# Import backend components
 from fileshare_peer import FileSharePeer
 from fileshare_client import FileShareClient
 
-# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('CipherShareGUI')
 
-# Constants
 APP_NAME = "CipherShare"
 APP_VERSION = "1.0.0"
-DEFAULT_THEME = "dark"  # or "light", "system"
+DEFAULT_THEME = "dark"
 DEFAULT_WIDTH = 1200
 DEFAULT_HEIGHT = 700
 
 class CipherShareApp(ctk.CTk):
-    """Main application window for CipherShare"""
     
     def __init__(self, host, port, rendezvous_host, rendezvous_port):
         super().__init__()
         
-        # Initialize backend components
         self.peer = FileSharePeer(host, port, rendezvous_host, rendezvous_port)
         self.client = FileShareClient(rendezvous_host, rendezvous_port)
         
-        # Start peer in background thread
         self.peer_thread = threading.Thread(target=self.peer.start)
         self.peer_thread.daemon = True
         self.peer_thread.start()
         
-        # Set up the main window
         self.title(f"{APP_NAME} - Secure Distributed File Sharing")
         self.geometry(f"{DEFAULT_WIDTH}x{DEFAULT_HEIGHT}")
         self.minsize(800, 600)
         
-        # Set theme
         ctk.set_appearance_mode(DEFAULT_THEME)
         ctk.set_default_color_theme("blue")
         
-        # Create assets folder for icons and images
         self.assets_dir = Path("assets")
         if not self.assets_dir.exists():
             self.assets_dir.mkdir()
         
-        # Initialize variables
         self.authenticated = False
         self.current_username = None
         self.search_results = []
-        self.current_view = "login"  # login, register, main, settings
+        self.current_view = "login"
         
-        # Set up the UI components
         self.setup_ui()
         
-        # Periodic refresh of file lists
         self.refresh_running = True
         self.refresh_thread = threading.Thread(target=self.background_refresh)
         self.refresh_thread.daemon = True
         self.refresh_thread.start()
     
     def setup_ui(self):
-        """Set up the main UI components"""
-        # Create main container
         self.main_container = ctk.CTkFrame(self)
         self.main_container.pack(fill=ctk.BOTH, expand=True, padx=10, pady=10)
         
-        # Set up the different views (only one will be visible at a time)
         self.setup_login_view()
         self.setup_register_view()
         self.setup_main_view()
         self.setup_settings_view()
         
-        # Start with login view
         self.show_view("login")
     
     def setup_login_view(self):
-        """Create the login screen"""
         self.login_frame = ctk.CTkFrame(self.main_container)
         
-        # Logo at the top
         self.login_logo_label = ctk.CTkLabel(
             self.login_frame, 
             text="CipherShare", 
@@ -95,7 +77,6 @@ class CipherShareApp(ctk.CTk):
         )
         self.login_logo_label.pack(pady=(40, 20))
         
-        # Subtitle
         self.login_subtitle = ctk.CTkLabel(
             self.login_frame,
             text="Secure Distributed File Sharing",
@@ -103,7 +84,6 @@ class CipherShareApp(ctk.CTk):
         )
         self.login_subtitle.pack(pady=(0, 40))
         
-        # Login form
         self.login_form = ctk.CTkFrame(self.login_frame)
         self.login_form.pack(padx=80, pady=20, fill=ctk.X)
         
@@ -119,7 +99,6 @@ class CipherShareApp(ctk.CTk):
         self.password_entry = ctk.CTkEntry(self.login_form, width=300, show="•")
         self.password_entry.pack(fill=ctk.X, pady=(0, 20))
         
-        # Buttons container
         self.login_buttons = ctk.CTkFrame(self.login_form)
         self.login_buttons.pack(fill=ctk.X, pady=(0, 10))
         
@@ -139,15 +118,12 @@ class CipherShareApp(ctk.CTk):
         )
         self.register_redirect_button.pack(side=ctk.RIGHT, padx=5, pady=10)
         
-        # Status message for login errors
         self.login_status = ctk.CTkLabel(self.login_frame, text="", text_color="red")
         self.login_status.pack(pady=10)
     
     def setup_register_view(self):
-        """Create the registration screen"""
         self.register_frame = ctk.CTkFrame(self.main_container)
         
-        # Title at the top
         self.register_title = ctk.CTkLabel(
             self.register_frame, 
             text="Create New Account", 
@@ -155,7 +131,6 @@ class CipherShareApp(ctk.CTk):
         )
         self.register_title.pack(pady=(40, 20))
         
-        # Registration form
         self.register_form = ctk.CTkFrame(self.register_frame)
         self.register_form.pack(padx=80, pady=20, fill=ctk.X)
         
@@ -177,7 +152,6 @@ class CipherShareApp(ctk.CTk):
         self.reg_confirm_entry = ctk.CTkEntry(self.register_form, width=300, show="•")
         self.reg_confirm_entry.pack(fill=ctk.X, pady=(0, 20))
         
-        # Security info
         self.security_info = ctk.CTkLabel(
             self.register_form, 
             text="Your password will be secured using Argon2id hashing",
@@ -186,7 +160,6 @@ class CipherShareApp(ctk.CTk):
         )
         self.security_info.pack(pady=(0, 10))
         
-        # Buttons container
         self.register_buttons = ctk.CTkFrame(self.register_form)
         self.register_buttons.pack(fill=ctk.X, pady=(0, 10))
         
@@ -206,19 +179,16 @@ class CipherShareApp(ctk.CTk):
         )
         self.login_redirect_button.pack(side=ctk.RIGHT, padx=5, pady=10)
         
-        # Status message for registration errors
         self.register_status = ctk.CTkLabel(self.register_frame, text="", text_color="red")
         self.register_status.pack(pady=10)
     
     def setup_main_view(self):
-        """Create the main application view"""
         self.main_frame = ctk.CTkFrame(self.main_container)
         
-        # Sidebar (left)
+        # Sidebar
         self.sidebar = ctk.CTkFrame(self.main_frame, width=200)
         self.sidebar.pack(side=ctk.LEFT, fill=ctk.Y, padx=10, pady=10)
         
-        # User info at top of sidebar
         self.user_frame = ctk.CTkFrame(self.sidebar)
         self.user_frame.pack(fill=ctk.X, padx=10, pady=10)
         
@@ -261,7 +231,7 @@ class CipherShareApp(ctk.CTk):
         )
         self.upload_button.pack(fill=ctk.X, pady=5)
         
-        # Settings and logout at bottom of sidebar
+        # Settings and logout
         self.bottom_buttons_frame = ctk.CTkFrame(self.sidebar)
         self.bottom_buttons_frame.pack(fill=ctk.X, padx=10, pady=10, side=ctk.BOTTOM)
         
@@ -278,29 +248,26 @@ class CipherShareApp(ctk.CTk):
             self.bottom_buttons_frame,
             text="Logout",
             command=self.perform_logout,
-            fg_color="#B22222"  # Red color for logout
+            fg_color="#B22222"
         )
         self.logout_button.pack(fill=ctk.X, pady=5)
         
-        # Main content area (right)
+        # Main content area
         self.content_frame = ctk.CTkFrame(self.main_frame)
         self.content_frame.pack(side=ctk.RIGHT, fill=ctk.BOTH, expand=True, padx=10, pady=10)
         
-        # Content views (only one visible at a time)
+        # Content views
         self.setup_my_files_view()
-        self.setup_shared_with_me_view()  # New view for files shared with current user
+        self.setup_shared_with_me_view()
         self.setup_search_view()
         self.setup_upload_view()
         
-        # Default to my files view
         self.current_content = "my_files"
         self.show_content(self.current_content)
     
     def setup_my_files_view(self):
-        """Create the 'My Files' view"""
         self.my_files_content = ctk.CTkFrame(self.content_frame)
         
-        # Header
         self.my_files_header = ctk.CTkFrame(self.my_files_content)
         self.my_files_header.pack(fill=ctk.X, pady=10)
         
@@ -343,11 +310,9 @@ class CipherShareApp(ctk.CTk):
             width=self.files_canvas.winfo_width()
         )
         
-        # Bind resize event to update canvas
         self.files_canvas.bind('<Configure>', self.on_canvas_configure)
         self.files_frame.bind('<Configure>', self.on_frame_configure)
         
-        # Empty state message
         self.empty_files_label = ctk.CTkLabel(
             self.files_frame,
             text="You are not sharing any files.",
@@ -356,10 +321,8 @@ class CipherShareApp(ctk.CTk):
         self.empty_files_label.pack(pady=50)
 
     def setup_shared_with_me_view(self):
-        """Create the 'Shared With Me' view"""
         self.shared_with_me_content = ctk.CTkFrame(self.content_frame)
         
-        # Header
         self.shared_with_me_header = ctk.CTkFrame(self.shared_with_me_content)
         self.shared_with_me_header.pack(fill=ctk.X, pady=10)
         
@@ -402,11 +365,9 @@ class CipherShareApp(ctk.CTk):
             width=self.shared_files_canvas.winfo_width()
         )
         
-        # Bind resize event to update canvas
         self.shared_files_canvas.bind('<Configure>', lambda e: self.on_canvas_configure(e, "shared"))
         self.shared_files_frame.bind('<Configure>', lambda e: self.on_frame_configure(e, "shared"))
         
-        # Empty state message
         self.empty_shared_files_label = ctk.CTkLabel(
             self.shared_files_frame,
             text="No files have been shared with you.",
@@ -415,7 +376,6 @@ class CipherShareApp(ctk.CTk):
         self.empty_shared_files_label.pack(pady=50)
     
     def setup_search_view(self):
-        """Create the 'Search Files' view"""
         self.search_content = ctk.CTkFrame(self.content_frame)
         
         # Search bar
@@ -462,11 +422,9 @@ class CipherShareApp(ctk.CTk):
             width=self.results_canvas.winfo_width()
         )
         
-        # Bind resize event to update canvas
         self.results_canvas.bind('<Configure>', lambda e: self.on_canvas_configure(e, "search"))
         self.results_frame.bind('<Configure>', lambda e: self.on_frame_configure(e, "search"))
         
-        # Empty state message
         self.empty_results_label = ctk.CTkLabel(
             self.results_frame,
             text="Search for files across the network",
@@ -475,10 +433,8 @@ class CipherShareApp(ctk.CTk):
         self.empty_results_label.pack(pady=50)
     
     def setup_upload_view(self):
-        """Create the 'Upload File' view"""
         self.upload_content = ctk.CTkFrame(self.content_frame)
         
-        # Header
         self.upload_header = ctk.CTkLabel(
             self.upload_content,
             text="Upload and Share File",
@@ -565,7 +521,6 @@ class CipherShareApp(ctk.CTk):
         )
         self.upload_button.pack(pady=10)
         
-        # Upload status
         self.upload_status_label = ctk.CTkLabel(
             self.upload_button_frame,
             text="",
@@ -573,14 +528,11 @@ class CipherShareApp(ctk.CTk):
         )
         self.upload_status_label.pack(pady=5)
         
-        # Initial upload button state (disabled until file selected)
         self.upload_button.configure(state=ctk.DISABLED)
     
     def setup_settings_view(self):
-        """Create the settings screen"""
         self.settings_frame = ctk.CTkFrame(self.main_container)
         
-        # Header
         self.settings_header = ctk.CTkLabel(
             self.settings_frame,
             text="Settings",
@@ -588,7 +540,6 @@ class CipherShareApp(ctk.CTk):
         )
         self.settings_header.pack(pady=(20, 30))
         
-        # Settings container
         self.settings_container = ctk.CTkFrame(self.settings_frame)
         self.settings_container.pack(fill=ctk.X, padx=50, pady=10)
         
@@ -675,13 +626,11 @@ class CipherShareApp(ctk.CTk):
         )
         self.back_button.pack(pady=30)
         
-        # Initialize download path from client
+        # Initialize download path
         self.download_path_entry.insert(0, str(self.client.download_dir))
     
-    # Helper methods for UI management
     def show_view(self, view_name):
-        """Switch between main application views"""
-        # Hide all views first
+        # Hide all views
         self.login_frame.pack_forget()
         self.register_frame.pack_forget()
         self.main_frame.pack_forget()
@@ -690,15 +639,12 @@ class CipherShareApp(ctk.CTk):
         # Show the requested view
         if view_name == "login":
             self.login_frame.pack(fill=ctk.BOTH, expand=True)
-            # Clear any previous login status messages
             self.login_status.configure(text="")
         elif view_name == "register":
             self.register_frame.pack(fill=ctk.BOTH, expand=True)
-            # Clear any previous registration status messages
             self.register_status.configure(text="")
         elif view_name == "main":
             if not self.authenticated:
-                # If not authenticated, show login view instead
                 self.show_view("login")
                 return
             self.main_frame.pack(fill=ctk.BOTH, expand=True)
@@ -708,8 +654,7 @@ class CipherShareApp(ctk.CTk):
         self.current_view = view_name
     
     def show_content(self, content_name):
-        """Switch between content views in the main view"""
-        # Hide all content views first
+        # Hide all content views
         self.my_files_content.pack_forget()
         self.shared_with_me_content.pack_forget()
         self.search_content.pack_forget()
@@ -726,7 +671,6 @@ class CipherShareApp(ctk.CTk):
             self.search_content.pack(fill=ctk.BOTH, expand=True)
         elif content_name == "upload":
             self.upload_content.pack(fill=ctk.BOTH, expand=True)
-            # Reset upload form
             self.selected_file_label.configure(text="No file selected")
             self.upload_button.configure(state=ctk.DISABLED)
             self.upload_status_label.configure(text="")
@@ -734,24 +678,18 @@ class CipherShareApp(ctk.CTk):
         self.current_content = content_name
     
     def show_my_files(self):
-        """Show the 'My Files' content view"""
         self.show_content("my_files")
     
     def show_shared_with_me(self):
-        """Show the 'Shared With Me' content view"""
         self.show_content("shared_with_me")
     
     def show_search(self):
-        """Show the 'Search Files' content view"""
         self.show_content("search")
     
     def show_upload(self):
-        """Show the 'Upload File' content view"""
         self.show_content("upload")
     
-    # Authentication and user management methods
     def perform_login(self):
-        """Handle login form submission"""
         username = self.username_entry.get()
         password = self.password_entry.get()
         
@@ -782,7 +720,6 @@ class CipherShareApp(ctk.CTk):
             self.login_status.configure(text=f"Login failed: {message}")
     
     def perform_logout(self):
-        """Handle logout button click"""
         if self.authenticated:
             self.peer.logout_user()
             self.client.logout()
@@ -794,7 +731,6 @@ class CipherShareApp(ctk.CTk):
             self.show_view("login")
     
     def perform_registration(self):
-        """Handle registration form submission"""
         username = self.reg_username_entry.get()
         password = self.reg_password_entry.get()
         confirm = self.reg_confirm_entry.get()
@@ -823,9 +759,7 @@ class CipherShareApp(ctk.CTk):
         else:
             self.register_status.configure(text=f"Registration failed: {message}")
     
-    # File operations methods
     def refresh_my_files(self):
-        """Refresh the list of user's shared files"""
         # Clear existing file entries
         for widget in self.files_frame.winfo_children():
             widget.destroy()
@@ -915,7 +849,7 @@ class CipherShareApp(ctk.CTk):
                 command=lambda fid=file_id: self.unshare_file(fid),
                 width=80,
                 height=25,
-                fg_color="#FF6347"  # Tomato red
+                fg_color="#FF6347"
             )
             unshare_button.pack(side=ctk.LEFT, padx=2)
             
@@ -935,7 +869,6 @@ class CipherShareApp(ctk.CTk):
         self.files_canvas.configure(scrollregion=self.files_canvas.bbox("all"))
 
     def refresh_shared_with_me(self):
-        """Refresh the list of files shared with the current user"""
         # Clear existing shared file entries
         for widget in self.shared_files_frame.winfo_children():
             widget.destroy()
@@ -950,14 +883,11 @@ class CipherShareApp(ctk.CTk):
         self.update_idletasks()
         
         # Get files shared with current user
-        # This requires the peer to have the update_shared_with_me method implemented
         shared_files = {}
         try:
-            # Call the method that we implemented in the backend
             if hasattr(self.peer, 'update_shared_with_me'):
                 shared_files = self.peer.update_shared_with_me()
             else:
-                # If method isn't implemented yet, use a temporary implementation
                 self._temp_update_shared_with_me()
         except Exception as e:
             logger.error(f"Error getting shared files: {e}")
@@ -966,7 +896,6 @@ class CipherShareApp(ctk.CTk):
         please_wait.destroy()
         
         if not shared_files:
-            # Show empty state message
             self.empty_shared_files_label = ctk.CTkLabel(
                 self.shared_files_frame,
                 text="No files have been shared with you.",
@@ -1051,25 +980,20 @@ class CipherShareApp(ctk.CTk):
         self.shared_files_canvas.configure(scrollregion=self.shared_files_canvas.bbox("all"))
     
     def _temp_update_shared_with_me(self):
-        """Temporary implementation to gather files shared with current user"""
         # Get peers from rendezvous server
         peers = self.client.get_peers()
-        # Dictionary to store files shared with the current user
         shared_with_me = {}
         
         # Query each peer for files shared with current user
         for peer_ip, peer_port in peers:
-            # Skip self
             if peer_ip == self.peer.host and peer_port == self.peer.port:
                 continue
                 
             try:
-                # Search for files from this peer
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(5)
                 sock.connect((peer_ip, peer_port))
                 
-                # Include authentication info in search request
                 search_command = "SEARCH"
                 if self.client.session_id and self.client.username:
                     search_command += f" {self.client.username} {self.client.session_id}"
@@ -1080,7 +1004,6 @@ class CipherShareApp(ctk.CTk):
                 sock.close()
                 
                 if response and not response.startswith("ERROR"):
-                    # Parse files shared by this peer
                     for file_line in response.split('\n'):
                         if file_line:
                             parts = file_line.split(':')
@@ -1090,9 +1013,7 @@ class CipherShareApp(ctk.CTk):
                                 file_size = int(parts[2])
                                 owner = parts[3]
                                 
-                                # Skip files owned by the current user
                                 if owner != self.current_username:
-                                    # Store in shared_with_me dict with peer info
                                     shared_with_me[file_id] = {
                                         "name": file_name,
                                         "size": file_size,
@@ -1103,28 +1024,22 @@ class CipherShareApp(ctk.CTk):
             except Exception as e:
                 logger.warning(f"Error getting files from peer {peer_ip}:{peer_port}: {e}")
         
-        # Return the results
         self.peer.files_shared_with_me = shared_with_me
         return shared_with_me
     
     def download_shared_file(self, file_id, peer_ip, peer_port):
-        """Download a file that has been shared with the current user"""
-        # Get file info first
         file_info = self.client.get_file_info(peer_ip, peer_port, file_id)
         
         if not file_info:
             self._show_message("Error", "Could not retrieve file information", "error")
             return
         
-        # Extract file name and size    
         file_name = file_info.get("name", "unknown")
         file_size = file_info.get("size", 0)
         
-        # For larger files, show a progress dialog
         if file_size > 1024 * 1024:  # 1 MB
             self._show_download_progress(peer_ip, peer_port, file_id, file_name, file_size, None, max_retries=3)
         else:
-            # For smaller files, download directly with retries
             success = self.client.download_file(peer_ip, peer_port, file_id, None, max_retries=3)
             
             if success:
@@ -1133,7 +1048,6 @@ class CipherShareApp(ctk.CTk):
                 self._show_message("Download Failed", f"Failed to download file '{file_name}'.", "error")
 
     def perform_search(self):
-        """Search for files in the network"""
         # Clear existing results
         for widget in self.results_frame.winfo_children():
             widget.destroy()
@@ -1146,17 +1060,15 @@ class CipherShareApp(ctk.CTk):
         )
         loading_label.pack(pady=50)
         
-        # Update UI immediately to show loading state
         self.update_idletasks()
         
-        # Perform search (this might take some time)
+        # Perform search
         search_results = self.client.search_files()
         
         # Remove loading indicator
         loading_label.destroy()
         
         if not search_results:
-            # Show empty state message
             empty_label = ctk.CTkLabel(
                 self.results_frame,
                 text="No files found. Try again later.",
@@ -1165,7 +1077,7 @@ class CipherShareApp(ctk.CTk):
             empty_label.pack(pady=50)
             return
         
-        # Store search results for download operations
+        # Store search results
         self.search_results = search_results
         
         # Create headers
@@ -1243,7 +1155,6 @@ class CipherShareApp(ctk.CTk):
         self.results_canvas.configure(scrollregion=self.results_canvas.bbox("all"))
     
     def choose_file_to_upload(self):
-        """Open file dialog to choose a file to upload"""
         import tkinter.filedialog as filedialog
         
         filename = filedialog.askopenfilename(
@@ -1257,7 +1168,6 @@ class CipherShareApp(ctk.CTk):
             self.upload_button.configure(state=ctk.NORMAL)
     
     def update_sharing_options(self):
-        """Update UI based on sharing type selection"""
         sharing_type = self.sharing_type_var.get()
         
         if sharing_type == "restricted":
@@ -1266,35 +1176,27 @@ class CipherShareApp(ctk.CTk):
             self.users_frame.pack_forget()
     
     def perform_upload(self):
-        """Handle file upload and sharing"""
         if not hasattr(self, 'selected_file_path'):
             return
         
-        sharing_type = self.sharing_type_var.get()
-        
-        # Disable button during upload and show status
+        # Disable button during upload
         self.upload_button.configure(state=ctk.DISABLED)
         self.upload_status_label.configure(text="Uploading file...", text_color="blue")
         
-        # Update UI immediately
         self.update_idletasks()
         
-        # Start upload in a separate thread to avoid freezing UI
+        # Start upload in a thread
         threading.Thread(target=self._upload_thread).start()
     
     def _upload_thread(self):
-        """Background thread for file upload operations"""
         try:
             sharing_type = self.sharing_type_var.get()
             
             if sharing_type == "public":
-                # Share with all users
                 file_id, message = self.peer.share_file(self.selected_file_path)
             else:
-                # Share with specific users
                 allowed_users = [user.strip() for user in self.users_entry.get().split(',') if user.strip()]
                 if not allowed_users:
-                    # If no users specified, revert to public
                     file_id, message = self.peer.share_file(self.selected_file_path)
                 else:
                     file_id, message = self.peer.share_file_with_users(self.selected_file_path, allowed_users)
@@ -1303,24 +1205,17 @@ class CipherShareApp(ctk.CTk):
             self.after(0, lambda: self._update_upload_status(file_id, message))
             
         except Exception as e:
-            # Update UI with error in the main thread
             self.after(0, lambda: self._update_upload_status(None, str(e)))
     
     def _update_upload_status(self, file_id, message):
-        """Update UI after upload completes (called from main thread)"""
         if file_id:
-            # Success
             self.upload_status_label.configure(text=f"Upload successful! File ID: {file_id}", text_color="green")
-            # Reset form after a few seconds
             self.after(3000, self._reset_upload_form)
         else:
-            # Error
             self.upload_status_label.configure(text=f"Upload failed: {message}", text_color="red")
-            # Re-enable upload button
             self.upload_button.configure(state=ctk.NORMAL)
     
     def _reset_upload_form(self):
-        """Reset the upload form after successful upload"""
         self.selected_file_label.configure(text="No file selected")
         if hasattr(self, 'selected_file_path'):
             del self.selected_file_path
@@ -1331,18 +1226,14 @@ class CipherShareApp(ctk.CTk):
         self.users_frame.pack_forget()
     
     def download_file(self, index):
-        """Download a file from search results"""
         if not self.search_results or index >= len(self.search_results):
             return
         
-        # Get file info from search results
         ip, port, file_id, name, size, owner, access = self.search_results[index]
         
-        # For larger files, show a progress dialog
         if size > 1024 * 1024:  # 1 MB
             self._show_download_progress(ip, port, file_id, name, size, None, max_retries=3)
         else:
-            # For smaller files, download directly with retries
             success = self.client.download_file(ip, port, file_id, None, max_retries=3)
             
             if success:
@@ -1351,14 +1242,13 @@ class CipherShareApp(ctk.CTk):
                 self._show_message("Download Failed", f"Failed to download file '{name}'.", "error")
     
     def _show_download_progress(self, ip, port, file_id, name, size, save_path, max_retries=3):
-        """Show download progress dialog and start download in background with retries"""
         # Create progress dialog
         progress_window = ctk.CTkToplevel(self)
         progress_window.title("Downloading File")
-        progress_window.geometry("400x250")  # Make taller for status messages
+        progress_window.geometry("400x250")
         progress_window.resizable(False, False)
-        progress_window.transient(self)  # Set as transient window to main window
-        progress_window.grab_set()  # Make it modal
+        progress_window.transient(self)
+        progress_window.grab_set()
         
         # Center the window
         progress_window.update_idletasks()
@@ -1382,7 +1272,7 @@ class CipherShareApp(ctk.CTk):
         
         progress_bar = ctk.CTkProgressBar(progress_window, width=350)
         progress_bar.pack(pady=10)
-        progress_bar.set(0)  # Initial progress
+        progress_bar.set(0)
         
         status_label = ctk.CTkLabel(
             progress_window,
@@ -1390,7 +1280,6 @@ class CipherShareApp(ctk.CTk):
         )
         status_label.pack(pady=5)
         
-        # Add retry information
         retry_label = ctk.CTkLabel(
             progress_window,
             text="Attempt 1 of 3"
@@ -1404,7 +1293,7 @@ class CipherShareApp(ctk.CTk):
         )
         cancel_button.pack(pady=10)
         
-        # Create shared variables for progress and status
+        # Track progress vars
         download_vars = {
             "progress": 0,
             "status": "Starting download...",
@@ -1422,7 +1311,7 @@ class CipherShareApp(ctk.CTk):
         
         cancel_button.configure(command=cancel_download)
         
-        # Start download in a separate thread
+        # Start download in a thread
         download_thread = threading.Thread(
             target=self._download_thread_with_retry,
             args=(ip, port, file_id, save_path, download_vars, max_retries)
@@ -1430,7 +1319,7 @@ class CipherShareApp(ctk.CTk):
         download_thread.daemon = True
         download_thread.start()
         
-        # Periodic update of progress dialog
+        # Update progress periodically
         def update_progress():
             if not progress_window.winfo_exists() or download_vars["cancelled"]:
                 return
@@ -1448,11 +1337,9 @@ class CipherShareApp(ctk.CTk):
             else:
                 progress_window.after(100, update_progress)
             
-        # Start progress updates
         update_progress()
     
     def _download_thread_with_retry(self, ip, port, file_id, save_path, download_vars, max_retries):
-        """Background thread for file download with retries and progress tracking"""
         for attempt in range(1, max_retries + 1):
             if download_vars["cancelled"]:
                 return
@@ -1462,23 +1349,18 @@ class CipherShareApp(ctk.CTk):
             download_vars["status"] = f"Starting download attempt {attempt}..."
             
             try:
-                # Ensure authentication is valid
                 if attempt > 1:
                     download_vars["status"] = "Re-authenticating with peer..."
                     self.client.authenticate_with_peer(ip, port)
                 
-                # Custom progress callback
                 def progress_callback(progress, status):
                     if download_vars["cancelled"]:
                         raise Exception("Download cancelled by user")
                     download_vars["progress"] = progress
                     download_vars["status"] = status
                 
-                # Attempt download with current client implementation
-                # (In a production environment, we'd modify the client to accept a progress callback)
                 success = self.client.download_file(ip, port, file_id, save_path)
                 
-                # Handle result
                 if success:
                     download_vars["completed"] = True
                     download_vars["success"] = True
@@ -1506,47 +1388,37 @@ class CipherShareApp(ctk.CTk):
                     download_vars["success"] = False
     
     def unshare_file(self, file_id):
-        """Remove a shared file"""
         if file_id in self.peer.shared_files:
-            # Confirm unshare
             confirm = self._show_confirm("Confirm Unshare", 
                                         f"Are you sure you want to unshare file '{self.peer.shared_files[file_id]['name']}'?")
             
             if confirm:
-                # Remove file from shared files
                 if file_id in self.peer.shared_files:
-                    # Delete physical file(s)
                     file_info = self.peer.shared_files[file_id]
                     path = file_info.get("path")
                     
                     if path:
                         if file_info.get("chunked", False):
-                            # It's a directory with chunks
                             try:
                                 import shutil
                                 shutil.rmtree(path)
                             except Exception as e:
                                 logger.error(f"Error removing chunks directory: {e}")
                         else:
-                            # Single file
                             try:
                                 os.remove(path)
                             except Exception as e:
                                 logger.error(f"Error removing file: {e}")
                     
-                    # Remove metadata
                     del self.peer.shared_files[file_id]
                     self.peer._save_shared_files()
                     
-                    # Refresh view
                     self.refresh_my_files()
     
     def edit_permissions(self, file_id, current_users):
-        """Edit file access permissions"""
         if file_id not in self.peer.shared_files:
             return
         
-        # Create dialog
         permissions_window = ctk.CTkToplevel(self)
         permissions_window.title("Edit Access Permissions")
         permissions_window.geometry("500x300")
@@ -1554,13 +1426,12 @@ class CipherShareApp(ctk.CTk):
         permissions_window.transient(self)
         permissions_window.grab_set()
         
-        # Center the window
+        # Center window
         permissions_window.update_idletasks()
         x = self.winfo_x() + (self.winfo_width() // 2) - (permissions_window.winfo_width() // 2)
         y = self.winfo_y() + (self.winfo_height() // 2) - (permissions_window.winfo_height() // 2)
         permissions_window.geometry(f"+{x}+{y}")
         
-        # File info
         file_info = self.peer.shared_files[file_id]
         
         file_label = ctk.CTkLabel(
@@ -1570,21 +1441,17 @@ class CipherShareApp(ctk.CTk):
         )
         file_label.pack(pady=(20, 10))
         
-        # Instructions
         instructions = ctk.CTkLabel(
             permissions_window,
             text="Enter usernames (comma separated) to allow access:"
         )
         instructions.pack(pady=(10, 5), padx=20, anchor=ctk.W)
         
-        # Users entry
         users_entry = ctk.CTkEntry(permissions_window, width=400)
         users_entry.pack(padx=20, pady=5, fill=ctk.X)
         
-        # Pre-fill current users
         users_entry.insert(0, ", ".join(current_users))
         
-        # Public option
         public_var = ctk.BooleanVar(value=False)
         public_checkbox = ctk.CTkCheckBox(
             permissions_window,
@@ -1594,7 +1461,6 @@ class CipherShareApp(ctk.CTk):
         )
         public_checkbox.pack(padx=20, pady=10, anchor=ctk.W)
         
-        # Buttons
         buttons_frame = ctk.CTkFrame(permissions_window)
         buttons_frame.pack(fill=ctk.X, padx=20, pady=20)
         
@@ -1615,48 +1481,33 @@ class CipherShareApp(ctk.CTk):
         save_button.pack(side=ctk.RIGHT, padx=10)
     
     def _save_permissions(self, file_id, users_str, is_public, dialog):
-        """Save updated file permissions"""
         if file_id in self.peer.shared_files:
             if is_public:
-                # Make file public (empty allowed_users list)
                 self.peer.shared_files[file_id]["allowed_users"] = []
             else:
-                # Update allowed users
                 allowed_users = [user.strip() for user in users_str.split(',') if user.strip()]
                 self.peer.shared_files[file_id]["allowed_users"] = allowed_users
             
-            # Save changes
             self.peer._save_shared_files()
-            
-            # Close dialog
             dialog.destroy()
-            
-            # Refresh view
             self.refresh_my_files()
     
-    # Settings methods
     def change_theme(self, theme_name):
-        """Change the application theme"""
         ctk.set_appearance_mode(theme_name)
     
     def browse_download_path(self):
-        """Open directory dialog to choose download location"""
         import tkinter.filedialog as filedialog
         
         directory = filedialog.askdirectory(title="Select Download Directory")
         
         if directory:
-            # Update entry field
             self.download_path_entry.delete(0, ctk.END)
             self.download_path_entry.insert(0, directory)
             
-            # Update client download directory
             self.client.download_dir = Path(directory)
             self.client.download_dir.mkdir(exist_ok=True)
     
     def init_secure_storage(self):
-        """Initialize secure credential storage"""
-        # Create dialog for master password
         password_window = ctk.CTkToplevel(self)
         password_window.title("Secure Storage Setup")
         password_window.geometry("400x250")
@@ -1664,13 +1515,12 @@ class CipherShareApp(ctk.CTk):
         password_window.transient(self)
         password_window.grab_set()
         
-        # Center the window
+        # Center window
         password_window.update_idletasks()
         x = self.winfo_x() + (self.winfo_width() // 2) - (password_window.winfo_width() // 2)
         y = self.winfo_y() + (self.winfo_height() // 2) - (password_window.winfo_height() // 2)
         password_window.geometry(f"+{x}+{y}")
         
-        # Content
         title_label = ctk.CTkLabel(
             password_window,
             text="Set Master Password",
@@ -1685,25 +1535,21 @@ class CipherShareApp(ctk.CTk):
         )
         info_label.pack(pady=(0, 20))
         
-        # Password entry
         master_pass_label = ctk.CTkLabel(password_window, text="Master Password:")
         master_pass_label.pack(anchor=ctk.W, padx=20, pady=(10, 0))
         
         master_pass_entry = ctk.CTkEntry(password_window, show="•", width=360)
         master_pass_entry.pack(padx=20, pady=(0, 10))
         
-        # Confirm password
         confirm_pass_label = ctk.CTkLabel(password_window, text="Confirm Password:")
         confirm_pass_label.pack(anchor=ctk.W, padx=20, pady=(10, 0))
         
         confirm_pass_entry = ctk.CTkEntry(password_window, show="•", width=360)
         confirm_pass_entry.pack(padx=20, pady=(0, 20))
         
-        # Status message
         status_label = ctk.CTkLabel(password_window, text="", text_color="red")
         status_label.pack(pady=5)
         
-        # Buttons
         def validate_and_init():
             master_pass = master_pass_entry.get()
             confirm_pass = confirm_pass_entry.get()
@@ -1723,7 +1569,6 @@ class CipherShareApp(ctk.CTk):
                 status_label.configure(text="Secure storage initialized!", text_color="green")
                 password_window.after(1500, password_window.destroy)
                 
-                # Update button state
                 self.init_secure_storage_button.configure(
                     text="Secure Storage Initialized",
                     state=ctk.DISABLED
@@ -1750,9 +1595,7 @@ class CipherShareApp(ctk.CTk):
         )
         save_button.pack(side=ctk.RIGHT, padx=10)
     
-    # Utility methods
     def format_size(self, size_bytes):
-        """Format file size in human-readable format"""
         if size_bytes < 1024:
             return f"{size_bytes} B"
         elif size_bytes < 1024 * 1024:
@@ -1763,29 +1606,27 @@ class CipherShareApp(ctk.CTk):
             return f"{size_bytes/(1024*1024*1024):.1f} GB"
     
     def _show_message(self, title, message, message_type="info"):
-        """Show a modal message dialog"""
         dialog = ctk.CTkToplevel(self)
         dialog.title(title)
         dialog.geometry("400x200")
         dialog.resizable(False, False)
-        dialog.transient(self)  # Set as transient window to main window
-        dialog.grab_set()  # Make it modal
+        dialog.transient(self)
+        dialog.grab_set()
         
-        # Center the window
+        # Center window
         dialog.update_idletasks()
         x = self.winfo_x() + (self.winfo_width() // 2) - (dialog.winfo_width() // 2)
         y = self.winfo_y() + (self.winfo_height() // 2) - (dialog.winfo_height() // 2)
         dialog.geometry(f"+{x}+{y}")
         
-        # Icon based on message type
+        icon_text = "ℹ️" if message_type == "info" else "⚠️" if message_type == "warning" else "❌"
         icon_label = ctk.CTkLabel(
             dialog,
-            text="ℹ️" if message_type == "info" else "⚠️" if message_type == "warning" else "❌",
+            text=icon_text,
             font=ctk.CTkFont(size=48)
         )
         icon_label.pack(pady=(20, 10))
         
-        # Message text
         msg_label = ctk.CTkLabel(
             dialog,
             text=message,
@@ -1793,7 +1634,6 @@ class CipherShareApp(ctk.CTk):
         )
         msg_label.pack(pady=10, padx=20)
         
-        # OK button
         ok_button = ctk.CTkButton(
             dialog,
             text="OK",
@@ -1803,8 +1643,7 @@ class CipherShareApp(ctk.CTk):
         ok_button.pack(pady=20)
     
     def _show_confirm(self, title, message):
-        """Show a confirmation dialog and return the result"""
-        result = [False]  # Use list for mutable reference
+        result = [False]
         
         dialog = ctk.CTkToplevel(self)
         dialog.title(title)
@@ -1813,13 +1652,12 @@ class CipherShareApp(ctk.CTk):
         dialog.transient(self)
         dialog.grab_set()
         
-        # Center the window
+        # Center window
         dialog.update_idletasks()
         x = self.winfo_x() + (self.winfo_width() // 2) - (dialog.winfo_width() // 2)
         y = self.winfo_y() + (self.winfo_height() // 2) - (dialog.winfo_height() // 2)
         dialog.geometry(f"+{x}+{y}")
         
-        # Warning icon
         icon_label = ctk.CTkLabel(
             dialog,
             text="⚠️",
@@ -1827,7 +1665,6 @@ class CipherShareApp(ctk.CTk):
         )
         icon_label.pack(pady=(20, 10))
         
-        # Message text
         msg_label = ctk.CTkLabel(
             dialog,
             text=message,
@@ -1835,7 +1672,6 @@ class CipherShareApp(ctk.CTk):
         )
         msg_label.pack(pady=10, padx=20)
         
-        # Buttons
         buttons_frame = ctk.CTkFrame(dialog)
         buttons_frame.pack(fill=ctk.X, padx=20, pady=20)
         
@@ -1856,18 +1692,15 @@ class CipherShareApp(ctk.CTk):
             buttons_frame,
             text="Confirm",
             command=confirm_action,
-            fg_color="#B22222"  # Red
+            fg_color="#B22222"
         )
         confirm_button.pack(side=ctk.RIGHT, padx=10)
         
-        # Wait for dialog to close
         self.wait_window(dialog)
         
         return result[0]
     
     def on_canvas_configure(self, event, view_type="files"):
-        """Handle canvas resize event"""
-        # Update the scrollable region to encompass the inner frame
         if view_type == "search":
             self.results_canvas.itemconfig(
                 self.results_canvas_window,
@@ -1885,7 +1718,6 @@ class CipherShareApp(ctk.CTk):
             )
     
     def on_frame_configure(self, event, view_type="files"):
-        """Reset the scroll region to encompass the inner frame"""
         if view_type == "search":
             self.results_canvas.configure(
                 scrollregion=self.results_canvas.bbox("all")
@@ -1900,24 +1732,18 @@ class CipherShareApp(ctk.CTk):
             )
     
     def background_refresh(self):
-        """Background thread for periodic data refresh"""
         while self.refresh_running:
-            time.sleep(5)  # Refresh every 5 seconds
+            time.sleep(5)
             
-            # Only refresh if authenticated and in the main view
             if not self.authenticated or self.current_view != "main":
                 continue
             
-            # Update UI in main thread
             if self.current_content == "my_files":
-                # Only refresh my files if we're on that view
                 self.after(0, self.refresh_my_files)
             elif self.current_content == "shared_with_me":
-                # Refresh shared with me view if active
                 self.after(0, self.refresh_shared_with_me)
 
 def main():
-    """Main entry point for the GUI application"""
     import argparse
     
     parser = argparse.ArgumentParser(description="CipherShare GUI")
@@ -1936,7 +1762,6 @@ def main():
         args.port = s.getsockname()[1]
         s.close()
     
-    # Start the GUI application
     app = CipherShareApp(args.host, args.port, args.rendezvous_host, args.rendezvous_port)
     app.mainloop()
 

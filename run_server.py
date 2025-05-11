@@ -1,4 +1,3 @@
-
 import argparse
 from rendezvous_server import RendezvousServer
 
@@ -14,4 +13,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

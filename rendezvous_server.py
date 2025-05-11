@@ -1,4 +1,3 @@
-# rendezvous_server.py
 import socket
 import threading
 import time
@@ -10,19 +9,17 @@ logger = logging.getLogger('RendezvousServer')
 class RendezvousServer:
     def __init__(self, host='0.0.0.0', port=5555):
         self.host, self.port = host, port
-        self.peers = []  # List of active peers (ip, port)
-        self.peer_last_seen = {}  # Track peer activity
-        self.lock = threading.Lock()  # For thread safety
+        self.peers = []
+        self.peer_last_seen = {}
+        self.lock = threading.Lock()
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     
     def start(self):
-        """Start the rendezvous server and begin accepting connections"""
         self.server.bind((self.host, self.port))
         self.server.listen(5)
         logger.info(f"Rendezvous Server running on {self.host}:{self.port}")
         
-        # Start a thread to clean inactive peers
         threading.Thread(target=self._clean_inactive_peers, daemon=True).start()
         
         try:
@@ -35,15 +32,14 @@ class RendezvousServer:
             self.server.close()
     
     def _clean_inactive_peers(self):
-        """Remove peers that haven't been seen in the last 5 minutes"""
         while True:
-            time.sleep(60)  # Check every minute
+            time.sleep(60)
             now = time.time()
             inactive_peers = []
             
             with self.lock:
                 for (ip, port), last_seen in list(self.peer_last_seen.items()):
-                    if now - last_seen > 300:  # 5 minutes
+                    if now - last_seen > 300:
                         inactive_peers.append((ip, port))
                         
                 for peer in inactive_peers:
@@ -56,9 +52,8 @@ class RendezvousServer:
                 logger.info(f"Removed {len(inactive_peers)} inactive peers")
     
     def handle_client(self, conn, addr):
-        """Handle incoming client connections"""
         try:
-            conn.settimeout(10)  # Set timeout for receiving data
+            conn.settimeout(10)
             data = conn.recv(1024).decode()
             
             if data.startswith("REGISTER"):
@@ -76,7 +71,6 @@ class RendezvousServer:
             conn.close()
     
     def _handle_register(self, conn, data):
-        """Register a new peer in the network"""
         try:
             _, ip, port = data.split()
             port = int(port)
@@ -94,16 +88,13 @@ class RendezvousServer:
             logger.warning(f"Invalid register format: {data}")
     
     def _handle_get_peers(self, conn):
-        """Send the list of peers to the client"""
         with self.lock:
-            # Convert peers to a safer string format
             peer_list = ";".join([f"{ip}:{port}" for ip, port in self.peers])
         
         conn.send(peer_list.encode())
         logger.debug(f"Sent peer list ({len(self.peers)} peers)")
     
     def _handle_heartbeat(self, conn, addr):
-        """Update the last seen time for a peer"""
         peer_ip = addr[0]
         
         with self.lock:
@@ -114,3 +105,4 @@ class RendezvousServer:
         
         conn.send(b"OK")
 
+        
